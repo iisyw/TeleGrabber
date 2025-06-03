@@ -30,6 +30,8 @@ telegrabber/
 
 ## 安装方法
 
+### 标准安装
+
 1. 克隆此仓库：
 
 ```bash
@@ -52,6 +54,48 @@ cp env.example .env
 # 编辑配置文件，填入你的Telegram机器人令牌
 nano .env  # 或者使用你喜欢的文本编辑器
 ```
+
+### Docker 部署
+
+TeleGrabber 也支持使用 Docker 进行部署，这是最简单、最推荐的部署方式：
+
+1. 克隆此仓库：
+```bash
+git clone https://github.com/yourusername/telegrabber.git
+cd telegrabber
+```
+
+2. 创建并配置 .env 文件：
+```bash
+# 复制配置模板
+cp env.example .env
+
+# 编辑配置文件
+nano .env
+```
+
+3. 使用 Docker Compose 启动服务：
+```bash
+docker-compose up -d
+```
+
+4. 查看日志：
+```bash
+docker-compose logs -f
+```
+
+5. 停止服务：
+```bash
+docker-compose down
+```
+
+Docker 部署的优点：
+- 无需手动安装 Python 和依赖
+- 环境隔离，不会影响系统环境
+- 自动重启服务
+- 数据持久化存储在宿主机的 downloads 目录
+
+注意：首次部署会自动构建镜像，这可能需要几分钟。下载的媒体文件将保存在宿主机的 `downloads` 目录中。
 
 ## 如何获取 Telegram 机器人令牌
 

@@ -1,0 +1,12 @@
+version: '3'
+
+services:
+  telegrabber:
+    build: .
+    container_name: telegrabber
+    restart: always
+    volumes:
+      - ./downloads:/app/downloads
+      - ./.env:/app/.env
+    environment:
+      - TZ=Asia/Shanghai 
