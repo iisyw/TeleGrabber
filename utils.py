@@ -5,6 +5,7 @@ import os
 import time
 import csv
 import hashlib
+import imghdr
 from datetime import datetime
 import logging
 
@@ -44,6 +45,45 @@ def get_short_id(media_group_id):
     """
     # 使用完整的媒体组ID，或者对于单张图片使用"single"
     return media_group_id if media_group_id else "single"
+
+def get_image_extension(file_path):
+    """检测图片文件的实际格式并返回正确的扩展名
+    
+    Args:
+        file_path: 图片文件路径
+        
+    Returns:
+        str: 正确的文件扩展名（带点，如.jpg）
+    """
+    # 使用imghdr检测图片类型
+    img_type = imghdr.what(file_path)
+    
+    # 确保获取到了类型
+    if img_type:
+        # 特殊处理jpeg (imghdr返回'jpeg'但扩展名通常为'jpg')
+        if img_type == 'jpeg':
+            return '.jpg'
+        # webp不在imghdr的默认检测中，需要单独处理
+        elif img_type == 'webp':
+            return '.webp'
+        return f'.{img_type}'
+    
+    # 如果无法检测，返回默认.jpg
+    logger.warning(f"无法检测图片类型: {file_path}, 使用默认.jpg扩展名")
+    return '.jpg'
+
+def generate_temp_filename(media_group_id=None):
+    """生成临时文件名（不带扩展名）用于下载
+    
+    Args:
+        media_group_id: 可选的媒体组ID
+        
+    Returns:
+        str: 生成的临时文件名
+    """
+    timestamp = int(time.time() * 1000)  # 毫秒级时间戳
+    short_id = get_short_id(media_group_id)
+    return f"{short_id}_{timestamp}"
 
 def generate_filename(photo_obj, media_group_id=None):
     """根据图片对象生成简洁的唯一文件名

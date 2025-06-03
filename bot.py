@@ -18,7 +18,8 @@ from telegram.ext import JobQueue
 
 from config import logger, SAVE_DIR
 from utils import (
-    get_save_directory, generate_filename, save_to_csv, get_short_id
+    get_save_directory, generate_filename, save_to_csv, get_short_id,
+    generate_temp_filename, get_image_extension
 )
 
 # 媒体组状态文件
@@ -242,16 +243,25 @@ def process_media_group_photos(context: CallbackContext):
                 'file_unique_id': photo_info['file_unique_id']
             })
             
-            # 生成文件名
-            file_name = generate_filename(photo_obj, media_group_id)
-            file_path = os.path.join(date_dir, file_name)
+            # 生成临时文件名（不带扩展名）
+            temp_filename = generate_temp_filename(media_group_id)
+            temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
             
-            # 下载照片
-            file.download(file_path)
+            # 下载到临时文件
+            file.download(temp_path)
+            
+            # 检测实际图片类型并获取扩展名
+            ext = get_image_extension(temp_path)
+            final_filename = f"{temp_filename}{ext}"
+            final_path = os.path.join(date_dir, final_filename)
+            
+            # 重命名为正确的扩展名
+            os.rename(temp_path, final_path)
+            
             processed_count += 1
             
             # 保存元数据到CSV
-            save_to_csv(user_obj, photo_obj, file_name, media_group_id)
+            save_to_csv(user_obj, photo_obj, final_filename, media_group_id)
             
             # 更新状态消息 - 每张图片都更新一次
             try:
@@ -264,7 +274,7 @@ def process_media_group_photos(context: CallbackContext):
             except Exception as e:
                 logger.error(f"更新进度消息失败: {e}")
             
-            logger.info(f"已保存媒体组图片 ({index}/{total_photos}): {file_path}")
+            logger.info(f"已保存媒体组图片 ({index}/{total_photos}): {final_path}")
             
         except Exception as e:
             logger.error(f"保存媒体组照片失败: {e}")
@@ -305,22 +315,37 @@ def process_photo(update: Update, context: CallbackContext) -> None:
         photo = message.photo[-1]
         photo_file = photo.get_file()
         
-        # 生成文件名
-        file_name = generate_filename(photo)
-        file_path = os.path.join(date_dir, file_name)
+        # 生成临时文件名（不带扩展名）
+        temp_filename = generate_temp_filename()
+        temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
         
         try:
-            # 下载图片
-            photo_file.download(file_path)
+            # 下载到临时文件
+            photo_file.download(temp_path)
+            
+            # 检测实际图片类型并获取扩展名
+            ext = get_image_extension(temp_path)
+            final_filename = f"{temp_filename}{ext}"
+            final_path = os.path.join(date_dir, final_filename)
+            
+            # 重命名为正确的扩展名
+            os.rename(temp_path, final_path)
             
             # 保存元数据到CSV
-            save_to_csv(user, photo, file_name)
+            save_to_csv(user, photo, final_filename)
             
-            logger.info(f"已保存单张图片: {file_path}")
+            logger.info(f"已保存单张图片: {final_path}")
             
             # 发送确认消息
             update.message.reply_text(f"✅ 图片已保存")
         except Exception as e:
+            # 清理临时文件
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+                
             logger.error(f"下载失败: {str(e)}")
             update.message.reply_text(f"❌ 图片保存失败: {str(e)}")
         return
@@ -356,38 +381,58 @@ def download_document(update: Update, context: CallbackContext) -> None:
     # 获取文件
     file = document.get_file()
     
-    # 保持原始文件名或生成新的文件名
+    # 处理文件名
     original_name = document.file_name
-    
-    # 使用精确到毫秒的纯数字时间戳
     timestamp = int(time.time() * 1000)  # 毫秒级时间戳
     
-    if original_name:
-        name_parts = os.path.splitext(original_name)
-        # 保留原始扩展名，前面加上时间戳
-        file_name = f"doc_{timestamp}{name_parts[1]}"
-    else:
-        # 没有原始文件名时使用时间戳
-        file_name = f"doc_{timestamp}.jpg"
-    
-    file_path = os.path.join(date_dir, file_name)
+    # 创建临时文件名用于下载
+    temp_filename = f"doc_{timestamp}_temp"
+    temp_path = os.path.join(date_dir, temp_filename)
     
     try:
-        # 下载文件
-        file.download(file_path)
+        # 下载到临时文件
+        file.download(temp_path)
+        
+        # 如果有原始文件名，优先使用其扩展名
+        if original_name and '.' in original_name:
+            ext = os.path.splitext(original_name)[1].lower()
+            # 验证扩展名是否与实际格式一致
+            detected_ext = get_image_extension(temp_path)
+            
+            # 如果检测到的扩展名与原始文件名不一致，记录日志
+            if ext.lower() != detected_ext.lower():
+                logger.warning(f"文件扩展名不匹配: 原始={ext}, 检测={detected_ext}, 使用检测结果")
+                ext = detected_ext
+        else:
+            # 没有原始扩展名，检测实际格式
+            ext = get_image_extension(temp_path)
+        
+        # 生成最终文件名和路径
+        final_filename = f"doc_{timestamp}{ext}"
+        final_path = os.path.join(date_dir, final_filename)
+        
+        # 重命名为最终文件名
+        os.rename(temp_path, final_path)
         
         # 保存元数据到CSV
         photo_obj = type('Photo', (), {
             'file_id': document.file_id,
             'file_unique_id': document.file_unique_id
         })
-        save_to_csv(user, photo_obj, file_name)
+        save_to_csv(user, photo_obj, final_filename)
         
-        logger.info(f"已保存文件: {file_path}")
+        logger.info(f"已保存文件: {final_path}")
         
         # 回复确认消息
         update.message.reply_text(f"✅ 图片已保存")
     except Exception as e:
+        # 清理临时文件
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+                
         logger.error(f"下载失败: {str(e)}")
         update.message.reply_text(f"❌ 图片保存失败: {str(e)}")
 
