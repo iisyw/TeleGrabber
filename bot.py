@@ -7,6 +7,8 @@ import json
 import logging
 import warnings
 from datetime import datetime
+import functools
+from collections import defaultdict
 
 # 忽略不相关的警告
 warnings.filterwarnings("ignore", message="python-telegram-bot is using upstream urllib3")
@@ -16,7 +18,7 @@ from telegram import Update, Message
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from telegram.ext import JobQueue
 
-from config import logger, SAVE_DIR
+from config import logger, SAVE_DIR, ALLOWED_USERS, ENABLE_USER_RESTRICTION, GITHUB_REPO
 from utils import (
     get_save_directory, generate_filename, save_to_csv, get_short_id,
     generate_temp_filename, get_image_extension, get_video_extension
@@ -29,6 +31,59 @@ MEDIA_GROUP_COLLECTION_FILE = os.path.join(SAVE_DIR, "media_groups_collection.js
 # 媒体组收集等待时间（秒）
 MEDIA_GROUP_COLLECT_TIME = 2
 
+# 存储最近提示过的用户，格式为 {user_id: last_notification_time}
+user_notification_cache = defaultdict(int)
+# 设置提示冷却时间（秒）
+NOTIFICATION_COOLDOWN = 60
+
+def is_user_allowed(update: Update) -> bool:
+    """检查用户是否被允许使用机器人"""
+    if not ENABLE_USER_RESTRICTION:
+        return True
+    
+    user = update.effective_user
+    if not user:
+        return False
+    
+    # 检查用户名和用户ID
+    username = user.username
+    user_id = str(user.id)
+    
+    # 检查用户是否在允许列表中
+    is_allowed = (username in ALLOWED_USERS) or (user_id in ALLOWED_USERS)
+    
+    # 记录验证结果
+    if not is_allowed:
+        logger.warning(f"用户验证失败: {username} (ID: {user_id}) 尝试使用机器人")
+    
+    return is_allowed
+
+def restricted(func):
+    """装饰器函数，仅允许特定用户访问"""
+    @functools.wraps(func)
+    def wrapped(update, context, *args, **kwargs):
+        if not is_user_allowed(update):
+            user_id = update.effective_user.id
+            current_time = time.time()
+            
+            # 检查是否在冷却时间内已经提示过
+            if current_time - user_notification_cache.get(user_id, 0) > NOTIFICATION_COOLDOWN:
+                unauthorized_message = (
+                    f"⛔ 访问受限\n\n"
+                    f"此机器人是私有实例，仅供特定用户使用。媒体文件将被下载到部署服务器的本地存储中，而不是转发给其他用户。\n\n"
+                    f"由于这是一个私人存储工具，只有授权用户才能使用此功能。\n\n" 
+                    f"您可以在GitHub上部署自己的TeleGrabber实例：\n"
+                    f"{GITHUB_REPO}"
+                )
+                update.message.reply_text(unauthorized_message)
+                
+                # 更新最后提示时间
+                user_notification_cache[user_id] = current_time
+            return
+        return func(update, context, *args, **kwargs)
+    return wrapped
+
+@restricted
 def start(update: Update, context: CallbackContext) -> None:
     """发送启动消息"""
     user = update.effective_user
@@ -45,6 +100,7 @@ def start(update: Update, context: CallbackContext) -> None:
     )
     update.message.reply_text(welcome_message)
 
+@restricted
 def help_command(update: Update, context: CallbackContext) -> None:
     """发送帮助信息"""
     help_message = (
@@ -348,6 +404,7 @@ def process_media_group_photos(context: CallbackContext):
     
     logger.info(f"媒体组 {media_group_id} 处理完成，共 {processed_count}/{total_items} 个文件")
 
+@restricted
 def process_photo(update: Update, context: CallbackContext) -> None:
     """处理所有照片，包括单张和媒体组中的照片"""
     message = update.message
@@ -414,6 +471,7 @@ def process_photo(update: Update, context: CallbackContext) -> None:
         schedule_media_group_processing(context, media_group_id, chat_id)
         logger.debug(f"已为媒体组 {media_group_id} 安排处理任务")
 
+@restricted
 def process_video(update: Update, context: CallbackContext) -> None:
     """处理所有视频，包括单个和媒体组中的视频"""
     message = update.message
@@ -480,6 +538,7 @@ def process_video(update: Update, context: CallbackContext) -> None:
         schedule_media_group_processing(context, media_group_id, chat_id)
         logger.debug(f"已为媒体组 {media_group_id} 安排处理任务")
 
+@restricted
 def download_document(update: Update, context: CallbackContext) -> None:
     """下载用户发送的文件（针对图片文件）"""
     user = update.effective_user
@@ -553,6 +612,7 @@ def download_document(update: Update, context: CallbackContext) -> None:
         logger.error(f"下载失败: {str(e)}")
         update.message.reply_text(f"❌ 图片保存失败: {str(e)}")
 
+@restricted
 def process_animation(update: Update, context: CallbackContext) -> None:
     """处理GIF动画"""
     message = update.message

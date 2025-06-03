@@ -24,6 +24,17 @@ SAVE_DIR = os.getenv('SAVE_DIR', 'downloads')
 PROXY = os.getenv('PROXY_URL')  # 可选的代理设置
 TIMEOUT = int(os.getenv('CONNECTION_TIMEOUT', '30'))  # 连接超时设置，默认30秒
 
+# 允许使用机器人的用户列表
+# 格式为逗号分隔的用户名或用户ID列表，例如: user1,user2,123456789
+ALLOWED_USERS_STR = os.getenv('ALLOWED_USERS', '')
+ALLOWED_USERS = [user.strip() for user in ALLOWED_USERS_STR.split(',') if user.strip()]
+
+# 是否启用用户限制功能，如果ALLOWED_USERS为空，则默认不启用
+ENABLE_USER_RESTRICTION = bool(ALLOWED_USERS)
+
+# GitHub仓库地址
+GITHUB_REPO = "https://github.com/iisyw/TeleGrabber"
+
 # 确保下载目录存在
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
