@@ -18,7 +18,7 @@ from telegram.ext import JobQueue
 
 from config import logger, SAVE_DIR
 from utils import (
-    get_save_directory, generate_filename
+    get_save_directory, generate_filename, save_to_csv, get_short_id
 )
 
 # 媒体组状态文件
@@ -227,20 +227,31 @@ def process_media_group_photos(context: CallbackContext):
     start_time = time.time()
     processed_count = 0
     
+    # 创建一个用户对象以便传递给save_to_csv函数
+    user_obj = type('User', (), {'username': user_name, 'first_name': user_name})
+    
     # 逐个处理照片
     for index, photo_info in enumerate(photo_infos, 1):
         try:
             # 获取照片文件
             file = context.bot.get_file(photo_info['file_id'])
             
-            # 生成文件名和路径
-            timestamp = int(time.time())
-            file_name = f"{timestamp}_{photo_info['file_unique_id']}_{media_group_id}.jpg"
+            # 创建照片对象以便生成文件名
+            photo_obj = type('Photo', (), {
+                'file_id': photo_info['file_id'],
+                'file_unique_id': photo_info['file_unique_id']
+            })
+            
+            # 生成文件名
+            file_name = generate_filename(photo_obj, media_group_id)
             file_path = os.path.join(date_dir, file_name)
             
             # 下载照片
             file.download(file_path)
             processed_count += 1
+            
+            # 保存元数据到CSV
+            save_to_csv(user_obj, photo_obj, file_name, media_group_id)
             
             # 更新状态消息 - 每张图片都更新一次
             try:
@@ -301,6 +312,10 @@ def process_photo(update: Update, context: CallbackContext) -> None:
         try:
             # 下载图片
             photo_file.download(file_path)
+            
+            # 保存元数据到CSV
+            save_to_csv(user, photo, file_name)
+            
             logger.info(f"已保存单张图片: {file_path}")
             
             # 发送确认消息
@@ -343,12 +358,31 @@ def download_document(update: Update, context: CallbackContext) -> None:
     
     # 保持原始文件名或生成新的文件名
     original_name = document.file_name
-    file_name = original_name if original_name else f"{int(time.time())}_{document.file_id}"
+    
+    # 使用精确到毫秒的纯数字时间戳
+    timestamp = int(time.time() * 1000)  # 毫秒级时间戳
+    
+    if original_name:
+        name_parts = os.path.splitext(original_name)
+        # 保留原始扩展名，前面加上时间戳
+        file_name = f"doc_{timestamp}{name_parts[1]}"
+    else:
+        # 没有原始文件名时使用时间戳
+        file_name = f"doc_{timestamp}.jpg"
+    
     file_path = os.path.join(date_dir, file_name)
     
     try:
         # 下载文件
         file.download(file_path)
+        
+        # 保存元数据到CSV
+        photo_obj = type('Photo', (), {
+            'file_id': document.file_id,
+            'file_unique_id': document.file_unique_id
+        })
+        save_to_csv(user, photo_obj, file_name)
+        
         logger.info(f"已保存文件: {file_path}")
         
         # 回复确认消息
