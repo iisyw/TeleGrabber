@@ -40,6 +40,11 @@ def main() -> None:
             # 注册消息处理器
             # 所有图片由一个处理器处理，在函数内部区分单张和媒体组
             dispatcher.add_handler(MessageHandler(Filters.photo, bot.process_photo))
+            # 添加视频处理器
+            dispatcher.add_handler(MessageHandler(Filters.video, bot.process_video))
+            # 添加动画(GIF)处理器
+            dispatcher.add_handler(MessageHandler(Filters.animation, bot.process_animation))
+            # 处理文档类型
             dispatcher.add_handler(MessageHandler(Filters.document.image, bot.download_document))
     
             # 启动机器人

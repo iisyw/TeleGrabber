@@ -19,7 +19,7 @@ from telegram.ext import JobQueue
 from config import logger, SAVE_DIR
 from utils import (
     get_save_directory, generate_filename, save_to_csv, get_short_id,
-    generate_temp_filename, get_image_extension
+    generate_temp_filename, get_image_extension, get_video_extension
 )
 
 # 媒体组状态文件
@@ -75,9 +75,9 @@ def save_media_groups_collection(collection):
                     'user_id': value['user_id'],
                     'user_name': value['user_name'],
                     'media_group_id': value['media_group_id'],
-                    'photos': [{'file_id': p['file_id'], 'file_unique_id': p['file_unique_id']} for p in value['photos']],
+                    'media_items': [{'file_id': p['file_id'], 'file_unique_id': p['file_unique_id'], 'media_type': p.get('media_type', 'photo')} for p in value['media_items']],
                     'first_time': value['first_time'].isoformat() if isinstance(value['first_time'], datetime) else value['first_time'],
-                    'status_message_id': value.get('status_message_id')  # 确保保存状态消息ID
+                    'status_message_id': value.get('status_message_id')
                 }
             
             json.dump(serializable_collection, f, ensure_ascii=False, indent=2)
@@ -87,24 +87,35 @@ def save_media_groups_collection(collection):
 
 def add_photo_to_collection(media_group_id, chat_id, user, photo, context=None, message=None):
     """将照片添加到媒体组收集中"""
+    # 修改为调用通用函数
+    return add_media_to_collection(media_group_id, chat_id, user, photo, "photo", context, message)
+
+def add_video_to_collection(media_group_id, chat_id, user, video, context=None, message=None):
+    """将视频添加到媒体组收集中"""
+    # 修改为调用通用函数
+    return add_media_to_collection(media_group_id, chat_id, user, video, "video", context, message)
+
+def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None):
+    """将媒体（照片或视频）添加到媒体组收集中"""
     collection = load_media_groups_collection()
     
     # 创建收集键
     collection_key = f"{chat_id}_{media_group_id}"
     
-    # 提取必要的照片信息，避免序列化问题
-    photo_info = {
-        'file_id': photo.file_id,
-        'file_unique_id': photo.file_unique_id
+    # 提取必要的媒体信息，避免序列化问题
+    media_info = {
+        'file_id': media_obj.file_id,
+        'file_unique_id': media_obj.file_unique_id,
+        'media_type': media_type  # 添加媒体类型字段
     }
     
-    # 如果这是该媒体组的第一张照片
-    is_first_photo = collection_key not in collection
-    if is_first_photo:
+    # 如果这是该媒体组的第一个媒体项
+    is_first_media = collection_key not in collection
+    if is_first_media:
         # 发送初始提示消息
         status_message = None
         if context and message:
-            status_message = message.reply_text("⏳ 正在收集媒体组图片，请稍候...")
+            status_message = message.reply_text("⏳ 正在收集媒体组内容，请稍候...")
             logger.info(f"为媒体组 {media_group_id} 创建了状态消息，ID: {status_message.message_id}")
         
         # 初始化该媒体组的收集
@@ -114,24 +125,24 @@ def add_photo_to_collection(media_group_id, chat_id, user, photo, context=None, 
             'user_id': user.id,
             'user_name': user.username or user.first_name,
             'media_group_id': media_group_id,
-            'photos': [photo_info],
+            'media_items': [media_info],  # 改名以反映可包含不同媒体类型
             'first_time': datetime.now().isoformat(),
             'status_message_id': status_message_id
         }
-        logger.info(f"开始收集媒体组 {media_group_id} 的照片，状态消息ID: {status_message_id}")
+        logger.info(f"开始收集媒体组 {media_group_id} 的内容，状态消息ID: {status_message_id}")
     else:
-        # 添加照片到现有收集，但不更新消息
-        collection[collection_key]['photos'].append(photo_info)
+        # 添加媒体到现有收集，但不更新消息
+        collection[collection_key]['media_items'].append(media_info)
         
         # 仅记录日志，不更新消息
-        photo_count = len(collection[collection_key]['photos'])
-        logger.debug(f"媒体组 {media_group_id} 添加了新照片，当前总数: {photo_count}")
+        media_count = len(collection[collection_key]['media_items'])
+        logger.debug(f"媒体组 {media_group_id} 添加了新{media_type}，当前总数: {media_count}")
     
     # 保存更新后的收集状态
     save_media_groups_collection(collection)
     
-    # 返回当前收集到的照片数量和是否是第一张
-    return len(collection[collection_key]['photos']), is_first_photo
+    # 返回当前收集到的媒体数量和是否是第一个
+    return len(collection[collection_key]['media_items']), is_first_media
 
 def schedule_media_group_processing(context, media_group_id, chat_id):
     """安排媒体组处理任务"""
@@ -146,7 +157,7 @@ def schedule_media_group_processing(context, media_group_id, chat_id):
     logger.debug(f"已安排媒体组 {media_group_id} 的处理任务")
 
 def process_media_group_photos(context: CallbackContext):
-    """处理收集好的媒体组照片"""
+    """处理收集好的媒体组内容（包括照片和视频）"""
     job = context.job
     collection_key = job.context['collection_key']
     
@@ -164,17 +175,17 @@ def process_media_group_photos(context: CallbackContext):
     chat_id = group_info['chat_id']
     media_group_id = group_info['media_group_id']
     user_name = group_info['user_name']
-    photo_infos = group_info['photos']
+    media_items = group_info['media_items']
     
     # 获取状态消息ID并记录日志
     status_message_id = group_info.get('status_message_id')
     logger.info(f"处理媒体组 {collection_key}，状态消息ID: {status_message_id}")
     
-    # 获取照片数量
-    total_photos = len(photo_infos)
+    # 获取媒体数量
+    total_items = len(media_items)
     
-    if total_photos == 0:
-        logger.warning(f"媒体组 {media_group_id} 没有照片")
+    if total_items == 0:
+        logger.warning(f"媒体组 {media_group_id} 没有内容")
         
         # 如果有状态消息，更新为错误信息
         if status_message_id:
@@ -182,7 +193,7 @@ def process_media_group_photos(context: CallbackContext):
                 context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=status_message_id,
-                    text="❌ 未能处理任何图片"
+                    text="❌ 未能处理任何媒体内容"
                 )
             except Exception as e:
                 logger.error(f"更新状态消息失败: {e}")
@@ -199,7 +210,7 @@ def process_media_group_photos(context: CallbackContext):
             status_message = context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_message_id,
-                text=f"⏳ 正在保存图片组：0/{total_photos}"
+                text=f"⏳ 正在保存媒体组：0/{total_items}"
             )
             logger.info(f"成功更新初始消息以开始处理阶段，消息ID: {status_message_id}")
         except Exception as e:
@@ -212,7 +223,7 @@ def process_media_group_photos(context: CallbackContext):
         try:
             status_message = context.bot.send_message(
                 chat_id=chat_id,
-                text=f"⏳ 正在保存图片组：0/{total_photos}"
+                text=f"⏳ 正在保存媒体组：0/{total_items}"
             )
             # 保存新创建的消息ID以便后续使用
             status_message_id = status_message.message_id
@@ -231,17 +242,11 @@ def process_media_group_photos(context: CallbackContext):
     # 创建一个用户对象以便传递给save_to_csv函数
     user_obj = type('User', (), {'username': user_name, 'first_name': user_name})
     
-    # 逐个处理照片
-    for index, photo_info in enumerate(photo_infos, 1):
+    # 逐个处理媒体项
+    for index, media_info in enumerate(media_items, 1):
         try:
-            # 获取照片文件
-            file = context.bot.get_file(photo_info['file_id'])
-            
-            # 创建照片对象以便生成文件名
-            photo_obj = type('Photo', (), {
-                'file_id': photo_info['file_id'],
-                'file_unique_id': photo_info['file_unique_id']
-            })
+            # 获取媒体文件
+            file = context.bot.get_file(media_info['file_id'])
             
             # 生成临时文件名（不带扩展名）
             temp_filename = generate_temp_filename(media_group_id)
@@ -250,8 +255,13 @@ def process_media_group_photos(context: CallbackContext):
             # 下载到临时文件
             file.download(temp_path)
             
-            # 检测实际图片类型并获取扩展名
-            ext = get_image_extension(temp_path)
+            # 根据媒体类型选择不同的扩展名检测函数
+            media_type = media_info.get('media_type', 'photo')
+            if media_type == 'video':
+                ext = get_video_extension(temp_path)
+            else:  # 默认为照片
+                ext = get_image_extension(temp_path)
+                
             final_filename = f"{temp_filename}{ext}"
             final_path = os.path.join(date_dir, final_filename)
             
@@ -260,24 +270,31 @@ def process_media_group_photos(context: CallbackContext):
             
             processed_count += 1
             
-            # 保存元数据到CSV
-            save_to_csv(user_obj, photo_obj, final_filename, media_group_id)
+            # 创建媒体对象以便保存元数据
+            media_obj = type('Media', (), {
+                'file_id': media_info['file_id'],
+                'file_unique_id': media_info['file_unique_id'],
+                'media_type': media_type
+            })
             
-            # 更新状态消息 - 每张图片都更新一次
+            # 保存元数据到CSV
+            save_to_csv(user_obj, media_obj, final_filename, media_group_id, media_type)
+            
+            # 更新状态消息 - 每个媒体项都更新一次
             try:
                 if status_message_id:
                     context.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=status_message_id,
-                        text=f"⏳ 正在保存图片组：{index}/{total_photos}"
+                        text=f"⏳ 正在保存媒体组：{index}/{total_items}"
                     )
             except Exception as e:
                 logger.error(f"更新进度消息失败: {e}")
             
-            logger.info(f"已保存媒体组图片 ({index}/{total_photos}): {final_path}")
+            logger.info(f"已保存媒体组{media_type} ({index}/{total_items}): {final_path}")
             
         except Exception as e:
-            logger.error(f"保存媒体组照片失败: {e}")
+            logger.error(f"保存媒体组{media_info.get('media_type', '内容')}失败: {e}")
     
     # 清理收集状态
     del collection[collection_key]
@@ -290,12 +307,12 @@ def process_media_group_photos(context: CallbackContext):
             context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_message_id,
-                text=f"✅ 图片组保存完成！({processed_count}/{total_photos}张图片，用时{elapsed_time:.1f}秒)"
+                text=f"✅ 媒体组保存完成！({processed_count}/{total_items}个文件，用时{elapsed_time:.1f}秒)"
             )
     except Exception as e:
         logger.error(f"更新完成消息失败: {e}")
     
-    logger.info(f"媒体组 {media_group_id} 处理完成，共 {processed_count}/{total_photos} 张图片")
+    logger.info(f"媒体组 {media_group_id} 处理完成，共 {processed_count}/{total_items} 个文件")
 
 def process_photo(update: Update, context: CallbackContext) -> None:
     """处理所有照片，包括单张和媒体组中的照片"""
@@ -355,11 +372,77 @@ def process_photo(update: Update, context: CallbackContext) -> None:
     photo = message.photo[-1]
     
     # 添加照片到收集
-    photo_count, is_first_photo = add_photo_to_collection(media_group_id, chat_id, user, photo, context, message)
-    logger.debug(f"媒体组 {media_group_id} 现有 {photo_count} 张照片, 是否第一张: {is_first_photo}")
+    media_count, is_first_media = add_photo_to_collection(media_group_id, chat_id, user, photo, context, message)
+    logger.debug(f"媒体组 {media_group_id} 现有 {media_count} 个媒体项, 是否第一个: {is_first_media}")
     
-    # 如果这是第一张照片，安排处理任务
-    if is_first_photo:
+    # 如果这是第一个媒体项，安排处理任务
+    if is_first_media:
+        schedule_media_group_processing(context, media_group_id, chat_id)
+        logger.debug(f"已为媒体组 {media_group_id} 安排处理任务")
+
+def process_video(update: Update, context: CallbackContext) -> None:
+    """处理所有视频，包括单个和媒体组中的视频"""
+    message = update.message
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    
+    # 检查是否为媒体组的一部分
+    media_group_id = message.media_group_id
+    
+    # 单个视频处理
+    if not media_group_id:
+        # 获取保存目录
+        date_dir = get_save_directory(user)
+        
+        # 获取视频
+        video = message.video
+        video_file = video.get_file()
+        
+        # 生成临时文件名（不带扩展名）
+        temp_filename = generate_temp_filename()
+        temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
+        
+        try:
+            # 下载到临时文件
+            video_file.download(temp_path)
+            
+            # 检测实际视频类型并获取扩展名
+            ext = get_video_extension(temp_path)
+            final_filename = f"{temp_filename}{ext}"
+            final_path = os.path.join(date_dir, final_filename)
+            
+            # 重命名为正确的扩展名
+            os.rename(temp_path, final_path)
+            
+            # 保存元数据到CSV
+            save_to_csv(user, video, final_filename, media_type='video')
+            
+            logger.info(f"已保存单个视频: {final_path}")
+            
+            # 发送确认消息
+            update.message.reply_text(f"✅ 视频已保存")
+        except Exception as e:
+            # 清理临时文件
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+                
+            logger.error(f"下载失败: {str(e)}")
+            update.message.reply_text(f"❌ 视频保存失败: {str(e)}")
+        return
+    
+    # 媒体组处理
+    # 获取视频对象
+    video = message.video
+    
+    # 添加视频到收集
+    media_count, is_first_media = add_video_to_collection(media_group_id, chat_id, user, video, context, message)
+    logger.debug(f"媒体组 {media_group_id} 现有 {media_count} 个媒体项, 是否第一个: {is_first_media}")
+    
+    # 如果这是第一个媒体项，安排处理任务
+    if is_first_media:
         schedule_media_group_processing(context, media_group_id, chat_id)
         logger.debug(f"已为媒体组 {media_group_id} 安排处理任务")
 
@@ -436,9 +519,112 @@ def download_document(update: Update, context: CallbackContext) -> None:
         logger.error(f"下载失败: {str(e)}")
         update.message.reply_text(f"❌ 图片保存失败: {str(e)}")
 
+def process_animation(update: Update, context: CallbackContext) -> None:
+    """处理GIF动画"""
+    message = update.message
+    user = update.effective_user
+    animation = message.animation
+    
+    # GIF动画不支持媒体组，所以不需要检查media_group_id
+    
+    # 获取保存目录
+    date_dir = get_save_directory(user)
+    
+    # 获取动画文件
+    animation_file = animation.get_file()
+    
+    # 生成临时文件名（不带扩展名）
+    temp_filename = generate_temp_filename()
+    temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
+    
+    try:
+        # 下载到临时文件
+        animation_file.download(temp_path)
+        
+        # GIF通常就是.gif格式，但我们也可以检测一下
+        ext = '.gif'  # 默认扩展名
+        
+        # 如果有mime_type，可以用它来确定扩展名
+        mime_type = getattr(animation, 'mime_type', None)
+        if mime_type == 'video/mp4':
+            ext = '.mp4'  # 有些"GIF"其实是无声MP4
+        elif mime_type and '/' in mime_type:
+            format_type = mime_type.split('/')[-1]
+            if format_type:
+                ext = f'.{format_type}'
+        
+        # 如果文件名中有扩展名，也可以从那里获取
+        file_name = getattr(animation, 'file_name', '')
+        if file_name and '.' in file_name:
+            name_ext = os.path.splitext(file_name)[1].lower()
+            if name_ext:
+                ext = name_ext
+        
+        # 生成最终文件名和路径
+        final_filename = f"{temp_filename}{ext}"
+        final_path = os.path.join(date_dir, final_filename)
+        
+        # 重命名为最终文件名
+        os.rename(temp_path, final_path)
+        
+        # 保存元数据到CSV
+        animation_obj = type('Animation', (), {
+            'file_id': animation.file_id,
+            'file_unique_id': animation.file_unique_id
+        })
+        save_to_csv(user, animation_obj, final_filename, media_type='animation')
+        
+        logger.info(f"已保存GIF动画: {final_path}")
+        
+        # 发送确认消息
+        update.message.reply_text(f"✅ GIF动画已保存")
+    except Exception as e:
+        # 清理临时文件
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+                
+        logger.error(f"下载GIF失败: {str(e)}")
+        update.message.reply_text(f"❌ GIF动画保存失败: {str(e)}")
+
 def handle_url_with_image(update: Update, context: CallbackContext) -> None:
     """处理包含图片的URL链接"""
     # 此功能需要额外的库来解析网页和下载图片，这里仅提供提示
     message = update.message
     if message.entities and any(entity.type == 'url' for entity in message.entities):
         update.message.reply_text("检测到链接，但目前不支持从URL下载图片。") 
+
+def main() -> None:
+    """启动机器人"""
+    # 初始化数据目录
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    
+    # 创建updater和dispatcher
+    updater = Updater(token=os.environ.get('TELEGRAM_BOT_TOKEN'))
+    dispatcher = updater.dispatcher
+    
+    # 添加处理器
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("help", help_command))
+    
+    # 照片处理器
+    dispatcher.add_handler(MessageHandler(Filters.photo, process_photo))
+    
+    # 视频处理器
+    dispatcher.add_handler(MessageHandler(Filters.video, process_video))
+    
+    # 文档处理器（图片文件）
+    dispatcher.add_handler(MessageHandler(Filters.document, download_document))
+    
+    # 动画处理器
+    dispatcher.add_handler(MessageHandler(Filters.animation, process_animation))
+    
+    # 启动机器人
+    updater.start_polling()
+    updater.idle()
+
+# 确保在直接运行脚本时执行main函数
+if __name__ == "__main__":
+    main() 

@@ -8,6 +8,7 @@ import hashlib
 import imghdr
 from datetime import datetime
 import logging
+import mimetypes
 
 from config import SAVE_DIR
 
@@ -45,6 +46,49 @@ def get_short_id(media_group_id):
     """
     # 使用完整的媒体组ID，或者对于单张图片使用"single"
     return media_group_id if media_group_id else "single"
+
+def get_video_extension(file_path):
+    """检测视频文件的实际格式并返回正确的扩展名
+    
+    Args:
+        file_path: 视频文件路径
+        
+    Returns:
+        str: 正确的文件扩展名（带点，如.mp4）
+    """
+    # 初始化mimetypes
+    if not mimetypes.inited:
+        mimetypes.init()
+    
+    # 尝试通过文件头部字节判断
+    video_signatures = {
+        b'\x00\x00\x00\x18\x66\x74\x79\x70\x6D\x70\x34\x32': '.mp4',  # MP4
+        b'\x00\x00\x00\x1C\x66\x74\x79\x70\x6D\x70\x34\x32': '.mp4',  # MP4
+        b'\x00\x00\x00\x20\x66\x74\x79\x70\x69\x73\x6F\x6D': '.mp4',  # MP4 (ISO)
+        b'\x1A\x45\xDF\xA3': '.webm',  # WebM
+        b'\x00\x00\x00\x14\x66\x74\x79\x70\x71\x74\x20\x20': '.mov',  # QuickTime
+        b'\x52\x49\x46\x46': '.avi'    # AVI
+    }
+    
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(12)  # 读取前12字节
+            for sig, ext in video_signatures.items():
+                if header.startswith(sig):
+                    return ext
+    except Exception as e:
+        logger.error(f"读取文件头部错误: {e}")
+    
+    # 通过mime类型判断
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if mime_type and mime_type.startswith('video/'):
+        ext = mimetypes.guess_extension(mime_type)
+        if ext:
+            return ext
+    
+    # 如果无法检测，默认为mp4
+    logger.warning(f"无法检测视频类型: {file_path}, 使用默认.mp4扩展名")
+    return '.mp4'
 
 def get_image_extension(file_path):
     """检测图片文件的实际格式并返回正确的扩展名
@@ -101,14 +145,15 @@ def generate_filename(photo_obj, media_group_id=None):
     short_id = get_short_id(media_group_id)
     return f"{short_id}_{timestamp}.jpg"
 
-def save_to_csv(user, photo_obj, file_name, media_group_id=None):
-    """将图片元数据保存到CSV文件
+def save_to_csv(user, media_obj, file_name, media_group_id=None, media_type='photo'):
+    """将媒体元数据保存到CSV文件
     
     Args:
         user: Telegram用户对象
-        photo_obj: Telegram照片对象
+        media_obj: Telegram媒体对象 (照片/视频)
         file_name: 保存的文件名
         media_group_id: 可选的媒体组ID
+        media_type: 媒体类型 ('photo' 或 'video')
     """
     user_dir = os.path.join(SAVE_DIR, f"{user.username or user.first_name}")
     if not os.path.exists(user_dir):
@@ -122,7 +167,7 @@ def save_to_csv(user, photo_obj, file_name, media_group_id=None):
     
     try:
         with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['filename', 'datetime', 'file_id', 'file_unique_id', 'media_group_id']
+            fieldnames = ['filename', 'datetime', 'file_id', 'file_unique_id', 'media_group_id', 'media_type']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             if not file_exists:
@@ -131,11 +176,12 @@ def save_to_csv(user, photo_obj, file_name, media_group_id=None):
             writer.writerow({
                 'filename': file_name,
                 'datetime': datetime.now().isoformat(),
-                'file_id': photo_obj.file_id,
-                'file_unique_id': photo_obj.file_unique_id,
-                'media_group_id': media_group_id or ''
+                'file_id': media_obj.file_id,
+                'file_unique_id': media_obj.file_unique_id,
+                'media_group_id': media_group_id or '',
+                'media_type': media_type
             })
-            logger.debug(f"已将图片元数据保存至CSV: {csv_path}")
+            logger.debug(f"已将{media_type}元数据保存至CSV: {csv_path}")
     except Exception as e:
         logger.error(f"保存元数据到CSV失败: {e}")
 
