@@ -32,11 +32,45 @@ MEDIA_GROUP_COLLECT_TIME = 2
 def start(update: Update, context: CallbackContext) -> None:
     """发送启动消息"""
     user = update.effective_user
-    update.message.reply_text(f'你好 {user.first_name}! 我会保存你发送的图片。')
+    welcome_message = (
+        f"你好 {user.first_name}！我是 TeleGrabber 机器人。\n\n"
+        f"我可以自动保存你发送的图片、视频和 GIF 动画。\n\n"
+        f"支持的媒体类型：\n"
+        f"✅ 图片 (JPG, PNG, WEBP 等)\n"
+        f"✅ 视频 (MP4, AVI, MOV 等)\n"
+        f"✅ GIF 动画\n"
+        f"✅ 媒体组/相册（包含图片和视频）\n\n"
+        f"⚠️ 注意：由于 Telegram Bot API 的限制，我只能下载 20MB 以下的媒体文件。\n\n"
+        f"发送 /help 查看更多帮助信息。"
+    )
+    update.message.reply_text(welcome_message)
 
 def help_command(update: Update, context: CallbackContext) -> None:
     """发送帮助信息"""
-    update.message.reply_text('发送图片给我，我会自动保存它们。')
+    help_message = (
+        f"💡 TeleGrabber 使用指南:\n\n"
+        f"直接发送以下内容给我，我会自动保存：\n"
+        f"• 单张图片\n"
+        f"• 单个视频\n"
+        f"• GIF 动画\n"
+        f"• 媒体组（相册）\n"
+        f"• 图片文件\n\n"
+        
+        f"⚠️ 限制说明：\n"
+        f"• 每个媒体文件最大 20MB\n"
+        f"• 超过大小限制的文件无法保存\n"
+        f"• 媒体组中的部分文件若超过限制，其他文件仍会正常保存\n\n"
+        
+        f"📁 文件保存路径：\n"
+        f"• 媒体文件按用户名和日期自动分类存储\n"
+        f"• 格式：downloads/用户名/日期/文件名\n\n"
+        
+        f"🔍 额外信息：\n"
+        f"• 所有媒体元数据会保存到CSV文件中\n"
+        f"• 支持断网重连和代理设置\n"
+        f"• 发送大型媒体组时，会显示实时进度\n"
+    )
+    update.message.reply_text(help_message)
 
 def load_media_groups_collection():
     """从文件加载媒体组收集状态"""
