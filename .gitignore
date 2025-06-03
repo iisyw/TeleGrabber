@@ -1,0 +1,19 @@
+# 环境变量文件
+.env
+
+# Python虚拟环境
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 图片保存目录
+downloads/
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+.DS_Store 
