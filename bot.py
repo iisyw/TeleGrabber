@@ -8,8 +8,9 @@ import logging
 import warnings
 from datetime import datetime
 import functools
-from collections import defaultdict
+from collections import defaultdict, deque
 import re
+import threading
 
 # 忽略不相关的警告
 warnings.filterwarnings("ignore", message="python-telegram-bot is using upstream urllib3")
@@ -36,6 +37,13 @@ MEDIA_GROUP_COLLECT_TIME = 2
 user_notification_cache = defaultdict(int)
 # 设置提示冷却时间（秒）
 NOTIFICATION_COOLDOWN = 60
+
+# 添加全局锁，确保同一时间只处理一个媒体组
+media_group_lock = threading.Lock()
+# 添加待处理媒体组队列
+pending_media_groups = deque()
+# 标记是否有正在处理的媒体组
+is_processing_media_group = False
 
 def is_user_allowed(update: Update) -> bool:
     """检查用户是否被允许使用机器人"""
@@ -133,11 +141,13 @@ def load_media_groups_collection():
     """从文件加载媒体组收集状态"""
     try:
         if not os.path.exists(MEDIA_GROUP_COLLECTION_FILE):
-            # 创建空文件
+            # 创建目录和空文件
+            os.makedirs(os.path.dirname(MEDIA_GROUP_COLLECTION_FILE), exist_ok=True)
             with open(MEDIA_GROUP_COLLECTION_FILE, 'w', encoding='utf-8') as f:
                 json.dump({}, f)
             return {}
         
+        # 确保读取文件时不被其他线程干扰
         with open(MEDIA_GROUP_COLLECTION_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             # 记录日志，查看加载的数据是否包含状态消息ID
@@ -147,6 +157,17 @@ def load_media_groups_collection():
                 else:
                     logger.warning(f"加载到的媒体组 {key} 不包含状态消息ID")
             return data
+    except json.JSONDecodeError as e:
+        logger.error(f"读取媒体组JSON数据失败，文件可能损坏: {e}")
+        # 创建备份并返回空数据
+        backup_file = f"{MEDIA_GROUP_COLLECTION_FILE}.bak.{int(time.time())}"
+        try:
+            if os.path.exists(MEDIA_GROUP_COLLECTION_FILE):
+                os.rename(MEDIA_GROUP_COLLECTION_FILE, backup_file)
+                logger.info(f"已将损坏的文件备份为: {backup_file}")
+        except Exception as backup_e:
+            logger.error(f"备份损坏文件失败: {backup_e}")
+        return {}
     except Exception as e:
         logger.error(f"加载媒体组收集状态失败: {e}")
         return {}
@@ -157,7 +178,9 @@ def save_media_groups_collection(collection):
         # 确保目录存在
         os.makedirs(os.path.dirname(MEDIA_GROUP_COLLECTION_FILE), exist_ok=True)
         
-        with open(MEDIA_GROUP_COLLECTION_FILE, 'w', encoding='utf-8') as f:
+        # 先写入临时文件
+        temp_file = f"{MEDIA_GROUP_COLLECTION_FILE}.tmp"
+        with open(temp_file, 'w', encoding='utf-8') as f:
             # 只保存可序列化的数据
             serializable_collection = {}
             for key, value in collection.items():
@@ -176,7 +199,15 @@ def save_media_groups_collection(collection):
                 }
             
             json.dump(serializable_collection, f, ensure_ascii=False, indent=2)
-            logger.debug(f"已保存媒体组收集状态，包含 {len(serializable_collection)} 个媒体组")
+        
+        # 安全地替换原文件
+        if os.path.exists(temp_file):
+            if os.path.exists(MEDIA_GROUP_COLLECTION_FILE):
+                os.replace(temp_file, MEDIA_GROUP_COLLECTION_FILE)
+            else:
+                os.rename(temp_file, MEDIA_GROUP_COLLECTION_FILE)
+            
+        logger.debug(f"已保存媒体组收集状态，包含 {len(serializable_collection)} 个媒体组")
     except Exception as e:
         logger.error(f"保存媒体组收集状态失败: {e}")
 
@@ -198,85 +229,133 @@ def add_video_to_collection(media_group_id, chat_id, user, video, context=None, 
 
 def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None, source=None, source_id=None, source_link=None, source_type=None):
     """将媒体（照片或视频）添加到媒体组收集中"""
-    collection = load_media_groups_collection()
-    
-    # 创建收集键
-    collection_key = f"{chat_id}_{media_group_id}"
-    
-    # 提取必要的媒体信息，避免序列化问题
-    media_info = {
-        'file_id': media_obj.file_id,
-        'file_unique_id': media_obj.file_unique_id,
-        'media_type': media_type  # 添加媒体类型字段
-    }
-    
-    # 如果这是该媒体组的第一个媒体项
-    is_first_media = collection_key not in collection
-    if is_first_media:
-        # 发送初始提示消息
-        status_message = None
-        if context and message:
-            status_message = message.reply_text("⏳ 正在收集媒体组内容，请稍候...")
-            logger.info(f"为媒体组 {media_group_id} 创建了状态消息，ID: {status_message.message_id}")
+    with media_group_lock:  # 使用锁确保线程安全
+        collection = load_media_groups_collection()
         
-        # 初始化该媒体组的收集
-        status_message_id = status_message.message_id if status_message else None
-        collection[collection_key] = {
-            'chat_id': chat_id,
-            'user_id': user.id,
-            'user_name': user.username or user.first_name,
-            'media_group_id': media_group_id,
-            'media_items': [media_info],  # 改名以反映可包含不同媒体类型
-            'first_time': datetime.now().isoformat(),
-            'status_message_id': status_message_id,
-            'source': source,
-            'source_id': source_id,
-            'source_link': source_link,
-            'source_type': source_type
+        # 创建收集键
+        collection_key = f"{chat_id}_{media_group_id}"
+        
+        # 提取必要的媒体信息，避免序列化问题
+        media_info = {
+            'file_id': media_obj.file_id,
+            'file_unique_id': media_obj.file_unique_id,
+            'media_type': media_type  # 添加媒体类型字段
         }
-        logger.info(f"开始收集媒体组 {media_group_id} 的内容，状态消息ID: {status_message_id}")
-    else:
-        # 添加媒体到现有收集，但不更新消息
-        collection[collection_key]['media_items'].append(media_info)
         
-        # 仅记录日志，不更新消息
-        media_count = len(collection[collection_key]['media_items'])
-        logger.debug(f"媒体组 {media_group_id} 添加了新{media_type}，当前总数: {media_count}")
-    
-    # 保存更新后的收集状态
-    save_media_groups_collection(collection)
-    
-    # 返回当前收集到的媒体数量和是否是第一个
-    return len(collection[collection_key]['media_items']), is_first_media
+        # 如果这是该媒体组的第一个媒体项
+        is_first_media = collection_key not in collection
+        if is_first_media:
+            # 发送初始提示消息
+            status_message = None
+            if context and message:
+                status_message = message.reply_text("⏳ 正在收集媒体组内容，请稍候...")
+                logger.info(f"为媒体组 {media_group_id} 创建了状态消息，ID: {status_message.message_id}")
+            
+            # 初始化该媒体组的收集
+            status_message_id = status_message.message_id if status_message else None
+            collection[collection_key] = {
+                'chat_id': chat_id,
+                'user_id': user.id,
+                'user_name': user.username or user.first_name,
+                'media_group_id': media_group_id,
+                'media_items': [media_info],  # 改名以反映可包含不同媒体类型
+                'first_time': datetime.now().isoformat(),
+                'status_message_id': status_message_id,
+                'source': source,
+                'source_id': source_id,
+                'source_link': source_link,
+                'source_type': source_type
+            }
+            logger.info(f"开始收集媒体组 {media_group_id} 的内容，状态消息ID: {status_message_id}")
+        else:
+            # 添加媒体到现有收集，但不更新消息
+            collection[collection_key]['media_items'].append(media_info)
+            
+            # 仅记录日志，不更新消息
+            media_count = len(collection[collection_key]['media_items'])
+            logger.debug(f"媒体组 {media_group_id} 添加了新{media_type}，当前总数: {media_count}")
+        
+        # 保存更新后的收集状态
+        save_media_groups_collection(collection)
+        
+        # 返回当前收集到的媒体数量和是否是第一个
+        return len(collection[collection_key]['media_items']), is_first_media
 
 def schedule_media_group_processing(context, media_group_id, chat_id):
     """安排媒体组处理任务"""
     collection_key = f"{chat_id}_{media_group_id}"
     
+    # 添加到待处理队列
+    with media_group_lock:
+        pending_media_groups.append(collection_key)
+        logger.debug(f"媒体组 {media_group_id} 已添加到处理队列，当前队列长度: {len(pending_media_groups)}")
+    
     # 设置延迟任务，在收集一段时间后处理
     context.job_queue.run_once(
-        process_media_group_photos,
+        process_next_media_group,
         MEDIA_GROUP_COLLECT_TIME,
-        context={'collection_key': collection_key}
+        context={'initial_key': collection_key}
     )
     logger.debug(f"已安排媒体组 {media_group_id} 的处理任务")
 
-def process_media_group_photos(context: CallbackContext):
+def process_next_media_group(context: CallbackContext):
+    """处理队列中的下一个媒体组"""
+    global is_processing_media_group
+    
+    with media_group_lock:
+        # 检查是否有待处理的媒体组
+        if not pending_media_groups:
+            is_processing_media_group = False
+            logger.debug("没有待处理的媒体组")
+            return
+            
+        # 如果已经有处理中的媒体组，直接返回
+        if is_processing_media_group:
+            return
+            
+        # 获取下一个媒体组
+        collection_key = pending_media_groups.popleft()
+        is_processing_media_group = True
+    
+    try:
+        # 处理媒体组
+        process_media_group_photos(context, collection_key)
+    except Exception as e:
+        logger.error(f"处理媒体组 {collection_key} 出错: {e}")
+    finally:
+        # 处理完成后，检查是否还有待处理的媒体组
+        with media_group_lock:
+            is_processing_media_group = False
+            if pending_media_groups:
+                # 如果还有待处理的媒体组，安排下一个处理任务
+                context.job_queue.run_once(
+                    process_next_media_group,
+                    0.5,  # 短暂延迟，避免连续处理导致的问题
+                    context={}
+                )
+
+def process_media_group_photos(context: CallbackContext, collection_key=None):
     """处理收集好的媒体组内容（包括照片和视频）"""
-    job = context.job
-    collection_key = job.context['collection_key']
+    # 如果没有指定collection_key，则从job中获取
+    if collection_key is None:
+        job = context.job
+        collection_key = job.context.get('initial_key')
     
     logger.info(f"开始处理媒体组 {collection_key}")
     
     # 加载媒体组收集状态
-    collection = load_media_groups_collection()
-    
-    if collection_key not in collection:
-        logger.error(f"媒体组收集 {collection_key} 不存在")
-        return
-    
-    # 获取媒体组信息
-    group_info = collection[collection_key]
+    with media_group_lock:
+        collection = load_media_groups_collection()
+        
+        if collection_key not in collection:
+            logger.error(f"媒体组收集 {collection_key} 不存在")
+            # 记录更多的错误信息以便诊断
+            logger.error(f"当前媒体组集合包含以下键: {list(collection.keys())}")
+            return
+        
+        # 获取媒体组信息
+        group_info = collection[collection_key]
+
     chat_id = group_info['chat_id']
     media_group_id = group_info['media_group_id']
     user_name = group_info['user_name']
@@ -307,8 +386,10 @@ def process_media_group_photos(context: CallbackContext):
             except Exception as e:
                 logger.error(f"更新状态消息失败: {e}")
         
-        del collection[collection_key]
-        save_media_groups_collection(collection)
+        with media_group_lock:
+            if collection_key in collection:
+                del collection[collection_key]
+                save_media_groups_collection(collection)
         return
     
     # 直接使用初始的状态消息
@@ -418,10 +499,6 @@ def process_media_group_photos(context: CallbackContext):
         except Exception as e:
             logger.error(f"保存媒体组{media_info.get('media_type', '内容')}失败: {e}")
     
-    # 清理收集状态
-    del collection[collection_key]
-    save_media_groups_collection(collection)
-    
     # 处理完成，更新状态消息
     elapsed_time = time.time() - start_time
     try:
@@ -435,6 +512,13 @@ def process_media_group_photos(context: CallbackContext):
         logger.error(f"更新完成消息失败: {e}")
     
     logger.info(f"媒体组 {media_group_id} 处理完成，共 {processed_count}/{total_items} 个文件")
+    
+    # 清理收集状态
+    with media_group_lock:
+        collection = load_media_groups_collection()
+        if collection_key in collection:
+            del collection[collection_key]
+            save_media_groups_collection(collection)
 
 @restricted
 def process_photo(update: Update, context: CallbackContext) -> None:
@@ -816,32 +900,84 @@ def get_forward_source_info(message):
 
 def main() -> None:
     """启动机器人"""
-    # 初始化数据目录
+    # 确保保存目录存在
     os.makedirs(SAVE_DIR, exist_ok=True)
     
-    # 创建updater和dispatcher
-    updater = Updater(token=os.environ.get('TELEGRAM_BOT_TOKEN'))
-    dispatcher = updater.dispatcher
-    
-    # 添加处理器
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    
-    # 照片处理器
-    dispatcher.add_handler(MessageHandler(Filters.photo, process_photo))
-    
-    # 视频处理器
-    dispatcher.add_handler(MessageHandler(Filters.video, process_video))
-    
-    # 文档处理器（图片文件）
-    dispatcher.add_handler(MessageHandler(Filters.document, download_document))
-    
-    # 动画处理器
-    dispatcher.add_handler(MessageHandler(Filters.animation, process_animation))
-    
-    # 启动机器人
-    updater.start_polling()
-    updater.idle()
+    # 创建 Updater 和传递 bot 令牌
+    updater = None
+    try:
+        from config import TELEGRAM_BOT_TOKEN, PROXY_URL
+        
+        logger.info("启动机器人...")
+        
+        if PROXY_URL:
+            logger.info(f"使用代理: {PROXY_URL}")
+            request_kwargs = {'proxy_url': PROXY_URL}
+            updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True, request_kwargs=request_kwargs)
+        else:
+            updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+            
+        # 获取调度程序
+        dispatcher = updater.dispatcher
+        
+        # 设置命令处理器
+        dispatcher.add_handler(CommandHandler("start", start))
+        dispatcher.add_handler(CommandHandler("help", help_command))
+        
+        # 设置媒体处理器
+        dispatcher.add_handler(MessageHandler(Filters.photo, process_photo))
+        dispatcher.add_handler(MessageHandler(Filters.video, process_video))
+        dispatcher.add_handler(MessageHandler(Filters.document, download_document))
+        dispatcher.add_handler(MessageHandler(Filters.animation, process_animation))
+        
+        # 显示重试次数
+        max_retries = 5
+        retry_count = 0
+        connected = False
+        
+        while retry_count < max_retries and not connected:
+            try:
+                retry_count += 1
+                logger.info(f"尝试连接Telegram API (尝试 {retry_count}/{max_retries})...")
+                
+                # 开始轮询
+                updater.start_polling()
+                connected = True
+                logger.info("机器人已启动，正在监听消息...")
+                
+                # 运行直到按Ctrl-C
+                updater.idle()
+            except Exception as e:
+                if retry_count < max_retries:
+                    wait_time = retry_count * 5  # 递增等待时间
+                    logger.error(f"连接失败: {e}. 将在 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                else:
+                    logger.critical(f"达到最大重试次数，无法启动机器人: {e}")
+                    raise
+    except Exception as e:
+        logger.critical(f"机器人启动失败: {e}")
+        raise
+    finally:
+        # 无论如何都要清理资源
+        if updater is not None:
+            try:
+                updater.stop()
+                logger.info("机器人已停止")
+            except:
+                pass
+        
+        # 清理临时文件
+        try:
+            temp_files = [f for f in os.listdir(SAVE_DIR) if f.endswith('_temp')]
+            for temp_file in temp_files:
+                try:
+                    os.remove(os.path.join(SAVE_DIR, temp_file))
+                except:
+                    pass
+            logger.info(f"清理了 {len(temp_files)} 个临时文件")
+        except:
+            pass
 
 # 确保在直接运行脚本时执行main函数
 if __name__ == "__main__":
