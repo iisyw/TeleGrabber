@@ -248,7 +248,13 @@ def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type
             # 发送初始提示消息
             status_message = None
             if context and message:
-                status_message = message.reply_text("⏳ 正在收集媒体组内容，请稍候...")
+                # 判断是否有其他媒体组正在处理或排队中
+                if is_processing_media_group or pending_media_groups:
+                    # 如果有其他媒体组在处理或排队，则显示排队提示
+                    status_message = message.reply_text("⏳ 媒体组已加入队列，请稍候...")
+                else:
+                    # 如果没有其他媒体组，则显示正在收集的提示
+                    status_message = message.reply_text("⏳ 正在收集媒体组内容，请稍候...")
                 logger.info(f"为媒体组 {media_group_id} 创建了状态消息，ID: {status_message.message_id}")
             
             # 初始化该媒体组的收集
