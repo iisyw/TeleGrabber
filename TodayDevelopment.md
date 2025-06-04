@@ -11,3 +11,4 @@
    - 对普通用户、私密用户和未知用户的内容进行分类
 5. 更新README，添加license
 6. 优化Dockerfile
+7. 取消启动脚本，直接在Dockerfile添加启动命令

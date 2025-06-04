@@ -22,8 +22,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制项目文件
 COPY . .
 
-# 设置入口点脚本权限
-RUN chmod +x docker-entrypoint.sh
-
-# 设置入口点
-ENTRYPOINT ["/app/docker-entrypoint.sh"] 
+# 直接设置启动命令
+CMD ["python", "main.py"] 
