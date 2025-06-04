@@ -347,9 +347,15 @@ def process_media_group_photos(context: CallbackContext):
     user_dir = os.path.join(SAVE_DIR, user_name)
     date_dir = os.path.join(user_dir, datetime.now().strftime("%Y-%m-%d"))
     
-    # 如果有来源信息，创建来源子文件夹
+    # 根据来源类型决定保存目录
     if source:
-        save_dir = os.path.join(date_dir, source)
+        if source_type in ["user", "private_user", "unknown_forward"]:
+            # 用户来源统一放在"users"文件夹下
+            users_dir = os.path.join(date_dir, "users")
+            save_dir = os.path.join(users_dir, source)
+        else:
+            # 其他类型的来源（频道、群组、机器人等）直接在日期目录下创建子文件夹
+            save_dir = os.path.join(date_dir, source)
     else:
         save_dir = date_dir
     
@@ -446,7 +452,7 @@ def process_photo(update: Update, context: CallbackContext) -> None:
     # 单张图片处理
     if not media_group_id:
         # 获取保存目录
-        date_dir = get_save_directory(user, source)
+        date_dir = get_save_directory(user, source, source_type)
         
         # 获取图片
         photo = message.photo[-1]
@@ -516,7 +522,7 @@ def process_video(update: Update, context: CallbackContext) -> None:
     # 单个视频处理
     if not media_group_id:
         # 获取保存目录
-        date_dir = get_save_directory(user, source)
+        date_dir = get_save_directory(user, source, source_type)
         
         # 获取视频
         video = message.video
@@ -587,7 +593,7 @@ def download_document(update: Update, context: CallbackContext) -> None:
         return
     
     # 获取保存目录
-    date_dir = get_save_directory(user, source)
+    date_dir = get_save_directory(user, source, source_type)
     
     # 获取文件
     file = document.get_file()
@@ -660,7 +666,7 @@ def process_animation(update: Update, context: CallbackContext) -> None:
     # GIF动画不支持媒体组，所以不需要检查media_group_id
     
     # 获取保存目录
-    date_dir = get_save_directory(user, source)
+    date_dir = get_save_directory(user, source, source_type)
     
     # 获取动画文件
     animation_file = animation.get_file()
@@ -770,12 +776,12 @@ def get_forward_source_info(message):
         is_bot = getattr(user_from, 'is_bot', False)
         
         if is_bot:
-            # 如果是机器人，只使用显示名称加_bot后缀
+            # 如果是机器人，使用显示名称，不再添加"_bot"后缀
             source_type = "bot"  # 机器人
             if user_from.first_name:
-                source = f"{user_from.first_name}_bot"
+                source = user_from.first_name
             else:
-                source = f"bot_{user_from.username or user_from.id}"
+                source = f"bot_{user_from.id}"
         else:
             # 如果是普通用户
             source_type = "user"  # 用户
@@ -789,7 +795,7 @@ def get_forward_source_info(message):
     
     elif hasattr(message, 'forward_sender_name') and message.forward_sender_name:
         # 处理只有名称没有ID的情况（通常是隐私设置或某些机器人）
-        source = f"unknown_{message.forward_sender_name}"
+        source = message.forward_sender_name
         source_id = "unknown"
         source_link = ""
         source_type = "private_user"  # 隐私用户

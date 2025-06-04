@@ -14,12 +14,13 @@ from config import SAVE_DIR
 
 logger = logging.getLogger(__name__)
 
-def get_save_directory(user, source=None):
+def get_save_directory(user, source=None, source_type=None):
     """创建并返回保存目录路径
     
     Args:
         user: Telegram用户对象
         source: 可选的来源信息（如转发来源的频道名或ID）
+        source_type: 可选的来源类型（如channel, group, user, bot等）
         
     Returns:
         str: 保存目录的完整路径
@@ -34,14 +35,28 @@ def get_save_directory(user, source=None):
     if not os.path.exists(date_dir):
         os.makedirs(date_dir)
     
-    # 如果提供了来源信息，创建来源子文件夹
-    if source:
-        source_dir = os.path.join(date_dir, source)
-        if not os.path.exists(source_dir):
-            os.makedirs(source_dir)
-        return source_dir
+    # 如果没有提供来源信息，直接返回日期目录
+    if not source:
+        return date_dir
     
-    return date_dir
+    # 根据来源类型决定保存路径
+    if source_type in ["user", "private_user", "unknown_forward"]:
+        # 用户来源统一放在"users"文件夹下
+        users_dir = os.path.join(date_dir, "users")
+        if not os.path.exists(users_dir):
+            os.makedirs(users_dir)
+        
+        # 在users目录下创建特定用户的子文件夹
+        source_dir = os.path.join(users_dir, source)
+    else:
+        # 其他类型的来源（频道、群组、机器人等）直接在日期目录下创建子文件夹
+        source_dir = os.path.join(date_dir, source)
+    
+    # 确保目录存在
+    if not os.path.exists(source_dir):
+        os.makedirs(source_dir)
+    
+    return source_dir
 
 def get_short_id(media_group_id):
     """从媒体组ID获取标识符
@@ -167,12 +182,19 @@ def save_to_csv(user, media_obj, file_name, media_group_id=None, media_type='pho
         source_link: 可选的来源链接（如频道链接或用户链接）
         source_type: 可选的来源类型（如channel, group, user, bot等）
     """
+    # 获取用户目录
     user_dir = os.path.join(SAVE_DIR, f"{user.username or user.first_name}")
     if not os.path.exists(user_dir):
         os.makedirs(user_dir)
         
+    # 获取日期目录
     date_str = datetime.now().strftime("%Y-%m-%d")
-    csv_path = os.path.join(user_dir, f"{date_str}_metadata.csv")
+    date_dir = os.path.join(user_dir, date_str)
+    if not os.path.exists(date_dir):
+        os.makedirs(date_dir)
+    
+    # CSV文件保存在日期目录下，而不是用户目录下
+    csv_path = os.path.join(date_dir, "metadata.csv")
     
     # 检查CSV是否存在，不存在则创建并写入表头
     file_exists = os.path.isfile(csv_path)
