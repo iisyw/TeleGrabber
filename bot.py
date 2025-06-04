@@ -9,6 +9,7 @@ import warnings
 from datetime import datetime
 import functools
 from collections import defaultdict
+import re
 
 # 忽略不相关的警告
 warnings.filterwarnings("ignore", message="python-telegram-bot is using upstream urllib3")
@@ -167,7 +168,11 @@ def save_media_groups_collection(collection):
                     'media_group_id': value['media_group_id'],
                     'media_items': [{'file_id': p['file_id'], 'file_unique_id': p['file_unique_id'], 'media_type': p.get('media_type', 'photo')} for p in value['media_items']],
                     'first_time': value['first_time'].isoformat() if isinstance(value['first_time'], datetime) else value['first_time'],
-                    'status_message_id': value.get('status_message_id')
+                    'status_message_id': value.get('status_message_id'),
+                    'source': value.get('source'),
+                    'source_id': value.get('source_id'),
+                    'source_link': value.get('source_link'),
+                    'source_type': value.get('source_type')
                 }
             
             json.dump(serializable_collection, f, ensure_ascii=False, indent=2)
@@ -177,15 +182,21 @@ def save_media_groups_collection(collection):
 
 def add_photo_to_collection(media_group_id, chat_id, user, photo, context=None, message=None):
     """将照片添加到媒体组收集中"""
+    # 获取转发来源
+    source, source_id, source_link, source_type = get_forward_source_info(message)
+    
     # 修改为调用通用函数
-    return add_media_to_collection(media_group_id, chat_id, user, photo, "photo", context, message)
+    return add_media_to_collection(media_group_id, chat_id, user, photo, "photo", context, message, source, source_id, source_link, source_type)
 
 def add_video_to_collection(media_group_id, chat_id, user, video, context=None, message=None):
     """将视频添加到媒体组收集中"""
+    # 获取转发来源
+    source, source_id, source_link, source_type = get_forward_source_info(message)
+    
     # 修改为调用通用函数
-    return add_media_to_collection(media_group_id, chat_id, user, video, "video", context, message)
+    return add_media_to_collection(media_group_id, chat_id, user, video, "video", context, message, source, source_id, source_link, source_type)
 
-def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None):
+def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None, source=None, source_id=None, source_link=None, source_type=None):
     """将媒体（照片或视频）添加到媒体组收集中"""
     collection = load_media_groups_collection()
     
@@ -217,7 +228,11 @@ def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type
             'media_group_id': media_group_id,
             'media_items': [media_info],  # 改名以反映可包含不同媒体类型
             'first_time': datetime.now().isoformat(),
-            'status_message_id': status_message_id
+            'status_message_id': status_message_id,
+            'source': source,
+            'source_id': source_id,
+            'source_link': source_link,
+            'source_type': source_type
         }
         logger.info(f"开始收集媒体组 {media_group_id} 的内容，状态消息ID: {status_message_id}")
     else:
@@ -266,6 +281,10 @@ def process_media_group_photos(context: CallbackContext):
     media_group_id = group_info['media_group_id']
     user_name = group_info['user_name']
     media_items = group_info['media_items']
+    source = group_info.get('source')  # 获取来源信息
+    source_id = group_info.get('source_id')  # 获取来源ID
+    source_link = group_info.get('source_link')  # 获取来源链接
+    source_type = group_info.get('source_type')  # 获取来源类型
     
     # 获取状态消息ID并记录日志
     status_message_id = group_info.get('status_message_id')
@@ -321,16 +340,23 @@ def process_media_group_photos(context: CallbackContext):
         except Exception as e:
             logger.error(f"创建状态消息失败: {e}")
     
+    # 创建一个用户对象以便传递给save_to_csv函数
+    user_obj = type('User', (), {'username': user_name, 'first_name': user_name})
+    
     # 获取用户目录
     user_dir = os.path.join(SAVE_DIR, user_name)
     date_dir = os.path.join(user_dir, datetime.now().strftime("%Y-%m-%d"))
-    os.makedirs(date_dir, exist_ok=True)
+    
+    # 如果有来源信息，创建来源子文件夹
+    if source:
+        save_dir = os.path.join(date_dir, source)
+    else:
+        save_dir = date_dir
+    
+    os.makedirs(save_dir, exist_ok=True)
     
     start_time = time.time()
     processed_count = 0
-    
-    # 创建一个用户对象以便传递给save_to_csv函数
-    user_obj = type('User', (), {'username': user_name, 'first_name': user_name})
     
     # 逐个处理媒体项
     for index, media_info in enumerate(media_items, 1):
@@ -340,7 +366,7 @@ def process_media_group_photos(context: CallbackContext):
             
             # 生成临时文件名（不带扩展名）
             temp_filename = generate_temp_filename(media_group_id)
-            temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
+            temp_path = os.path.join(save_dir, f"{temp_filename}_temp")
             
             # 下载到临时文件
             file.download(temp_path)
@@ -353,7 +379,7 @@ def process_media_group_photos(context: CallbackContext):
                 ext = get_image_extension(temp_path)
                 
             final_filename = f"{temp_filename}{ext}"
-            final_path = os.path.join(date_dir, final_filename)
+            final_path = os.path.join(save_dir, final_filename)
             
             # 重命名为正确的扩展名
             os.rename(temp_path, final_path)
@@ -368,7 +394,7 @@ def process_media_group_photos(context: CallbackContext):
             })
             
             # 保存元数据到CSV
-            save_to_csv(user_obj, media_obj, final_filename, media_group_id, media_type)
+            save_to_csv(user_obj, media_obj, final_filename, media_group_id, media_type, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             # 更新状态消息 - 每个媒体项都更新一次
             try:
@@ -411,13 +437,16 @@ def process_photo(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id
     
+    # 获取转发来源
+    source, source_id, source_link, source_type = get_forward_source_info(message)
+    
     # 检查是否为媒体组的一部分
     media_group_id = message.media_group_id
     
     # 单张图片处理
     if not media_group_id:
         # 获取保存目录
-        date_dir = get_save_directory(user)
+        date_dir = get_save_directory(user, source)
         
         # 获取图片
         photo = message.photo[-1]
@@ -440,7 +469,7 @@ def process_photo(update: Update, context: CallbackContext) -> None:
             os.rename(temp_path, final_path)
             
             # 保存元数据到CSV
-            save_to_csv(user, photo, final_filename)
+            save_to_csv(user, photo, final_filename, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             logger.info(f"已保存单张图片: {final_path}")
             
@@ -478,13 +507,16 @@ def process_video(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id
     
+    # 获取转发来源
+    source, source_id, source_link, source_type = get_forward_source_info(message)
+    
     # 检查是否为媒体组的一部分
     media_group_id = message.media_group_id
     
     # 单个视频处理
     if not media_group_id:
         # 获取保存目录
-        date_dir = get_save_directory(user)
+        date_dir = get_save_directory(user, source)
         
         # 获取视频
         video = message.video
@@ -507,7 +539,7 @@ def process_video(update: Update, context: CallbackContext) -> None:
             os.rename(temp_path, final_path)
             
             # 保存元数据到CSV
-            save_to_csv(user, video, final_filename, media_type='video')
+            save_to_csv(user, video, final_filename, media_type='video', source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             logger.info(f"已保存单个视频: {final_path}")
             
@@ -545,6 +577,9 @@ def download_document(update: Update, context: CallbackContext) -> None:
     message = update.message
     document = message.document
     
+    # 获取转发来源
+    source, source_id, source_link, source_type = get_forward_source_info(message)
+    
     # 检查是否为图片文件
     mime_type = document.mime_type
     if not mime_type or not mime_type.startswith('image/'):
@@ -552,7 +587,7 @@ def download_document(update: Update, context: CallbackContext) -> None:
         return
     
     # 获取保存目录
-    date_dir = get_save_directory(user)
+    date_dir = get_save_directory(user, source)
     
     # 获取文件
     file = document.get_file()
@@ -595,7 +630,7 @@ def download_document(update: Update, context: CallbackContext) -> None:
             'file_id': document.file_id,
             'file_unique_id': document.file_unique_id
         })
-        save_to_csv(user, photo_obj, final_filename)
+        save_to_csv(user, photo_obj, final_filename, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
         
         logger.info(f"已保存文件: {final_path}")
         
@@ -619,10 +654,13 @@ def process_animation(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
     animation = message.animation
     
+    # 获取转发来源
+    source, source_id, source_link, source_type = get_forward_source_info(message)
+    
     # GIF动画不支持媒体组，所以不需要检查media_group_id
     
     # 获取保存目录
-    date_dir = get_save_directory(user)
+    date_dir = get_save_directory(user, source)
     
     # 获取动画文件
     animation_file = animation.get_file()
@@ -666,7 +704,7 @@ def process_animation(update: Update, context: CallbackContext) -> None:
             'file_id': animation.file_id,
             'file_unique_id': animation.file_unique_id
         })
-        save_to_csv(user, animation_obj, final_filename, media_type='animation')
+        save_to_csv(user, animation_obj, final_filename, media_type='animation', source=source, source_id=source_id, source_link=source_link, source_type=source_type)
         
         logger.info(f"已保存GIF动画: {final_path}")
         
@@ -689,6 +727,86 @@ def handle_url_with_image(update: Update, context: CallbackContext) -> None:
     message = update.message
     if message.entities and any(entity.type == 'url' for entity in message.entities):
         update.message.reply_text("检测到链接，但目前不支持从URL下载图片。") 
+
+def get_forward_source_info(message):
+    """获取转发来源的详细信息
+    
+    Args:
+        message: Telegram消息对象
+        
+    Returns:
+        tuple: (source, source_id, source_link, source_type) 来源名称、ID、链接和类型
+    """
+    source = None
+    source_id = None
+    source_link = None
+    source_type = "unknown"  # 默认来源类型
+    
+    if message.forward_from_chat:
+        # 如果是从频道或群组转发
+        chat = message.forward_from_chat
+        source = chat.title or f"chat_{chat.id}"
+        source_id = str(chat.id)
+        
+        # 确定来源类型
+        if chat.type == "channel":
+            source_type = "channel"  # 频道
+        elif chat.type == "supergroup" or chat.type == "group":
+            source_type = "group"  # 群组
+        
+        # 创建链接
+        if chat.username:
+            # 公开频道/群组
+            source_link = f"https://t.me/{chat.username}"
+        else:
+            # 私有频道/群组
+            source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}"
+            
+    elif message.forward_from:
+        # 如果是从用户转发
+        user_from = message.forward_from
+        
+        # 检查是否是机器人
+        is_bot = getattr(user_from, 'is_bot', False)
+        
+        if is_bot:
+            # 如果是机器人，只使用显示名称加_bot后缀
+            source_type = "bot"  # 机器人
+            if user_from.first_name:
+                source = f"{user_from.first_name}_bot"
+            else:
+                source = f"bot_{user_from.username or user_from.id}"
+        else:
+            # 如果是普通用户
+            source_type = "user"  # 用户
+            source = user_from.username or user_from.first_name or f"user_{user_from.id}"
+            
+        source_id = str(user_from.id)
+        
+        # 创建用户链接
+        if user_from.username:
+            source_link = f"https://t.me/{user_from.username}"
+    
+    elif hasattr(message, 'forward_sender_name') and message.forward_sender_name:
+        # 处理只有名称没有ID的情况（通常是隐私设置或某些机器人）
+        source = f"unknown_{message.forward_sender_name}"
+        source_id = "unknown"
+        source_link = ""
+        source_type = "private_user"  # 隐私用户
+    
+    elif hasattr(message, 'forward_from_message_id') and message.forward_from_message_id:
+        # 有转发消息ID但没有来源信息的情况
+        source = "forwarded_message"
+        source_id = str(message.forward_from_message_id)
+        source_link = ""
+        source_type = "unknown_forward"  # 未知转发
+    
+    # 文件夹命名安全处理，移除非法字符
+    if source:
+        # 将不安全的文件夹字符替换为下划线
+        source = re.sub(r'[\\/*?:"<>|]', "_", source)
+    
+    return source, source_id, source_link, source_type
 
 def main() -> None:
     """启动机器人"""

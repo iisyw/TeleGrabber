@@ -14,11 +14,12 @@ from config import SAVE_DIR
 
 logger = logging.getLogger(__name__)
 
-def get_save_directory(user):
+def get_save_directory(user, source=None):
     """创建并返回保存目录路径
     
     Args:
         user: Telegram用户对象
+        source: 可选的来源信息（如转发来源的频道名或ID）
         
     Returns:
         str: 保存目录的完整路径
@@ -32,6 +33,13 @@ def get_save_directory(user):
     date_dir = os.path.join(user_dir, datetime.now().strftime("%Y-%m-%d"))
     if not os.path.exists(date_dir):
         os.makedirs(date_dir)
+    
+    # 如果提供了来源信息，创建来源子文件夹
+    if source:
+        source_dir = os.path.join(date_dir, source)
+        if not os.path.exists(source_dir):
+            os.makedirs(source_dir)
+        return source_dir
     
     return date_dir
 
@@ -145,7 +153,7 @@ def generate_filename(photo_obj, media_group_id=None):
     short_id = get_short_id(media_group_id)
     return f"{short_id}_{timestamp}.jpg"
 
-def save_to_csv(user, media_obj, file_name, media_group_id=None, media_type='photo'):
+def save_to_csv(user, media_obj, file_name, media_group_id=None, media_type='photo', source=None, source_id=None, source_link=None, source_type=None):
     """将媒体元数据保存到CSV文件
     
     Args:
@@ -154,6 +162,10 @@ def save_to_csv(user, media_obj, file_name, media_group_id=None, media_type='pho
         file_name: 保存的文件名
         media_group_id: 可选的媒体组ID
         media_type: 媒体类型 ('photo' 或 'video')
+        source: 可选的来源信息（如转发来源的频道名或ID）
+        source_id: 可选的来源ID（如频道ID或用户ID）
+        source_link: 可选的来源链接（如频道链接或用户链接）
+        source_type: 可选的来源类型（如channel, group, user, bot等）
     """
     user_dir = os.path.join(SAVE_DIR, f"{user.username or user.first_name}")
     if not os.path.exists(user_dir):
@@ -167,7 +179,7 @@ def save_to_csv(user, media_obj, file_name, media_group_id=None, media_type='pho
     
     try:
         with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['filename', 'datetime', 'file_id', 'file_unique_id', 'media_group_id', 'media_type']
+            fieldnames = ['filename', 'datetime', 'file_id', 'file_unique_id', 'media_group_id', 'media_type', 'source', 'source_id', 'source_link', 'source_type']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             if not file_exists:
@@ -179,7 +191,11 @@ def save_to_csv(user, media_obj, file_name, media_group_id=None, media_type='pho
                 'file_id': media_obj.file_id,
                 'file_unique_id': media_obj.file_unique_id,
                 'media_group_id': media_group_id or '',
-                'media_type': media_type
+                'media_type': media_type,
+                'source': source or '',
+                'source_id': source_id or '',
+                'source_link': source_link or '',
+                'source_type': source_type or 'unknown'
             })
             logger.debug(f"已将{media_type}元数据保存至CSV: {csv_path}")
     except Exception as e:
