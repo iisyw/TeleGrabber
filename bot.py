@@ -11,6 +11,7 @@ import functools
 from collections import defaultdict, deque
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # 忽略不相关的警告
 warnings.filterwarnings("ignore", message="python-telegram-bot is using upstream urllib3")
@@ -22,8 +23,9 @@ from telegram.ext import JobQueue
 
 from config import logger, SAVE_DIR, ALLOWED_USERS, ENABLE_USER_RESTRICTION, GITHUB_REPO
 from utils import (
-    get_save_directory, generate_filename, save_to_csv, get_short_id,
-    generate_temp_filename, get_image_extension, get_video_extension
+    get_save_directory, generate_filename, save_to_db, get_short_id,
+    generate_temp_filename, get_image_extension, get_video_extension,
+    get_duplicate_info
 )
 
 # 媒体组状态文件
@@ -44,6 +46,14 @@ media_group_lock = threading.Lock()
 pending_media_groups = deque()
 # 标记是否有正在处理的媒体组
 is_processing_media_group = False
+
+# --- 内存缓存优化 ---
+# 在内存中存储当前正在收集的媒体组，减少磁盘 I/O
+# 格式: {collection_key: group_info_dict}
+active_collections = {}
+# 用于并行下载的线程池
+download_executor = ThreadPoolExecutor(max_workers=5)
+# --- 内存缓存优化结束 ---
 
 def is_user_allowed(update: Update) -> bool:
     """检查用户是否被允许使用机器人"""
@@ -127,87 +137,65 @@ def help_command(update: Update, context: CallbackContext) -> None:
         f"• 媒体组中的部分文件若超过限制，其他文件仍会正常保存\n\n"
         
         f"📁 文件保存路径：\n"
-        f"• 媒体文件按用户名和日期自动分类存储\n"
-        f"• 格式：downloads/用户名/日期/文件名\n\n"
+        f"• 媒体文件按来源自动分类存储（统一媒体库）\n"
+        f"• 格式：downloads/来源名称/文件名\n\n"
         
         f"🔍 额外信息：\n"
-        f"• 所有媒体元数据会保存到CSV文件中\n"
+        f"• 所有媒体元数据会保存到 SQLite 数据库中并记录用户信息\n"
+        f"• 自动检测重复资源并跳过，节省磁盘空间\n"
         f"• 支持断网重连和代理设置\n"
         f"• 发送大型媒体组时，会显示实时进度\n"
     )
     update.message.reply_text(help_message)
 
 def load_media_groups_collection():
-    """从文件加载媒体组收集状态"""
+    """从文件加载媒体组收集状态（仅在启动时调用一次）"""
+    global active_collections
     try:
         if not os.path.exists(MEDIA_GROUP_COLLECTION_FILE):
-            # 创建目录和空文件
-            os.makedirs(os.path.dirname(MEDIA_GROUP_COLLECTION_FILE), exist_ok=True)
-            with open(MEDIA_GROUP_COLLECTION_FILE, 'w', encoding='utf-8') as f:
-                json.dump({}, f)
             return {}
         
-        # 确保读取文件时不被其他线程干扰
         with open(MEDIA_GROUP_COLLECTION_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # 记录日志，查看加载的数据是否包含状态消息ID
-            for key, value in data.items():
-                if 'status_message_id' in value:
-                    logger.debug(f"加载到的媒体组 {key} 包含状态消息ID: {value['status_message_id']}")
-                else:
-                    logger.warning(f"加载到的媒体组 {key} 不包含状态消息ID")
+            # 加载到内存缓存
+            active_collections = data
+            logger.info(f"已从磁盘恢复了 {len(active_collections)} 个媒体组收集状态")
             return data
-    except json.JSONDecodeError as e:
-        logger.error(f"读取媒体组JSON数据失败，文件可能损坏: {e}")
-        # 创建备份并返回空数据
-        backup_file = f"{MEDIA_GROUP_COLLECTION_FILE}.bak.{int(time.time())}"
-        try:
-            if os.path.exists(MEDIA_GROUP_COLLECTION_FILE):
-                os.rename(MEDIA_GROUP_COLLECTION_FILE, backup_file)
-                logger.info(f"已将损坏的文件备份为: {backup_file}")
-        except Exception as backup_e:
-            logger.error(f"备份损坏文件失败: {backup_e}")
-        return {}
     except Exception as e:
         logger.error(f"加载媒体组收集状态失败: {e}")
         return {}
 
-def save_media_groups_collection(collection):
-    """保存媒体组收集状态到文件"""
-    try:
-        # 确保目录存在
-        os.makedirs(os.path.dirname(MEDIA_GROUP_COLLECTION_FILE), exist_ok=True)
+def save_media_groups_collection(collection=None):
+    """保存媒体组收集状态到文件（异步持久化）"""
+    # 允许不传参，默认保存内存中的数据
+    if collection is None:
+        collection = active_collections
         
-        # 先写入临时文件
+    try:
+        os.makedirs(os.path.dirname(MEDIA_GROUP_COLLECTION_FILE), exist_ok=True)
         temp_file = f"{MEDIA_GROUP_COLLECTION_FILE}.tmp"
         with open(temp_file, 'w', encoding='utf-8') as f:
-            # 只保存可序列化的数据
             serializable_collection = {}
             for key, value in collection.items():
+                # 确保数据是可序列化的
                 serializable_collection[key] = {
                     'chat_id': value['chat_id'],
                     'user_id': value['user_id'],
                     'user_name': value['user_name'],
                     'media_group_id': value['media_group_id'],
-                    'media_items': [{'file_id': p['file_id'], 'file_unique_id': p['file_unique_id'], 'media_type': p.get('media_type', 'photo')} for p in value['media_items']],
-                    'first_time': value['first_time'].isoformat() if isinstance(value['first_time'], datetime) else value['first_time'],
+                    'media_items': value['media_items'],
+                    'first_time': value['first_time'],
                     'status_message_id': value.get('status_message_id'),
                     'source': value.get('source'),
                     'source_id': value.get('source_id'),
                     'source_link': value.get('source_link'),
-                    'source_type': value.get('source_type')
+                    'source_type': value.get('source_type'),
+                    'caption': value.get('caption')
                 }
-            
             json.dump(serializable_collection, f, ensure_ascii=False, indent=2)
         
-        # 安全地替换原文件
-        if os.path.exists(temp_file):
-            if os.path.exists(MEDIA_GROUP_COLLECTION_FILE):
-                os.replace(temp_file, MEDIA_GROUP_COLLECTION_FILE)
-            else:
-                os.rename(temp_file, MEDIA_GROUP_COLLECTION_FILE)
-            
-        logger.debug(f"已保存媒体组收集状态，包含 {len(serializable_collection)} 个媒体组")
+        os.replace(temp_file, MEDIA_GROUP_COLLECTION_FILE)
+        logger.debug("已将媒体组状态异步持久化到磁盘")
     except Exception as e:
         logger.error(f"保存媒体组收集状态失败: {e}")
 
@@ -228,64 +216,51 @@ def add_video_to_collection(media_group_id, chat_id, user, video, context=None, 
     return add_media_to_collection(media_group_id, chat_id, user, video, "video", context, message, source, source_id, source_link, source_type)
 
 def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None, source=None, source_id=None, source_link=None, source_type=None):
-    """将媒体（照片或视频）添加到媒体组收集中"""
-    with media_group_lock:  # 使用锁确保线程安全
-        collection = load_media_groups_collection()
-        
-        # 创建收集键
+    """将媒体（照片或视频）添加到媒体组收集中 (优化版：优先操作内存)"""
+    with media_group_lock:
         collection_key = f"{chat_id}_{media_group_id}"
         
-        # 提取必要的媒体信息，避免序列化问题
         media_info = {
             'file_id': media_obj.file_id,
             'file_unique_id': media_obj.file_unique_id,
-            'media_type': media_type  # 添加媒体类型字段
+            'media_type': media_type
         }
         
-        # 如果这是该媒体组的第一个媒体项
-        is_first_media = collection_key not in collection
+        is_first_media = collection_key not in active_collections
         if is_first_media:
-            # 发送初始提示消息
             status_message = None
             if context and message:
-                # 判断是否有其他媒体组正在处理或排队中
                 if is_processing_media_group or pending_media_groups:
-                    # 如果有其他媒体组在处理或排队，则显示排队提示
                     status_message = message.reply_text("⏳ 媒体组已加入队列，请稍候...")
                 else:
-                    # 如果没有其他媒体组，则显示正在收集的提示
                     status_message = message.reply_text("⏳ 正在收集媒体组内容，请稍候...")
-                logger.info(f"为媒体组 {media_group_id} 创建了状态消息，ID: {status_message.message_id}")
             
-            # 初始化该媒体组的收集
             status_message_id = status_message.message_id if status_message else None
-            collection[collection_key] = {
+            active_collections[collection_key] = {
                 'chat_id': chat_id,
                 'user_id': user.id,
                 'user_name': user.username or user.first_name,
                 'media_group_id': media_group_id,
-                'media_items': [media_info],  # 改名以反映可包含不同媒体类型
+                'media_items': [media_info],
                 'first_time': datetime.now().isoformat(),
                 'status_message_id': status_message_id,
                 'source': source,
                 'source_id': source_id,
                 'source_link': source_link,
-                'source_type': source_type
+                'source_type': source_type,
+                'caption': message.caption if message else None
             }
-            logger.info(f"开始收集媒体组 {media_group_id} 的内容，状态消息ID: {status_message_id}")
+            logger.info(f"开始收集媒体组 {media_group_id}，消息ID: {status_message_id}")
+            # 只有第一个消息产生时才写盘，减少 I/O
+            save_media_groups_collection()
         else:
-            # 添加媒体到现有收集，但不更新消息
-            collection[collection_key]['media_items'].append(media_info)
-            
-            # 仅记录日志，不更新消息
-            media_count = len(collection[collection_key]['media_items'])
-            logger.debug(f"媒体组 {media_group_id} 添加了新{media_type}，当前总数: {media_count}")
+            active_collections[collection_key]['media_items'].append(media_info)
+            # 如果后续消息有 caption 而之前的没有，则更新（针对媒体组）
+            if not active_collections[collection_key].get('caption') and message and message.caption:
+                active_collections[collection_key]['caption'] = message.caption
+            logger.debug(f"媒体组 {media_group_id} 添加了{media_type}，总数: {len(active_collections[collection_key]['media_items'])}")
         
-        # 保存更新后的收集状态
-        save_media_groups_collection(collection)
-        
-        # 返回当前收集到的媒体数量和是否是第一个
-        return len(collection[collection_key]['media_items']), is_first_media
+        return len(active_collections[collection_key]['media_items']), is_first_media
 
 def schedule_media_group_processing(context, media_group_id, chat_id):
     """安排媒体组处理任务"""
@@ -371,160 +346,192 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
     source_link = group_info.get('source_link')  # 获取来源链接
     source_type = group_info.get('source_type')  # 获取来源类型
     
-    # 获取状态消息ID并记录日志
-    status_message_id = group_info.get('status_message_id')
-    logger.info(f"处理媒体组 {collection_key}，状态消息ID: {status_message_id}")
+def download_with_retry(file_obj, path, retries=3):
+    """带重试机制的文件下载"""
+    for i in range(retries):
+        try:
+            file_obj.download(path)
+            return True
+        except Exception as e:
+            if i == retries - 1:
+                raise
+            wait = (i + 1) * 2
+            logger.warning(f"下载失败: {e}，将在 {wait}s 后进行第 {i+2} 次重试...")
+            time.sleep(wait)
+    return False
+
+def process_media_group_photos(context: CallbackContext, collection_key=None):
+    """处理媒体组内容 (并发下载优化版)"""
+    if collection_key is None:
+        collection_key = context.job.context.get('initial_key')
     
-    # 获取媒体数量
+    # 优先从内存获取
+    with media_group_lock:
+        group_info = active_collections.get(collection_key)
+        if not group_info:
+            logger.error(f"媒体组收集 {collection_key} 不存在")
+            return
+
+    chat_id = group_info['chat_id']
+    media_group_id = group_info['media_group_id']
+    user_name = group_info['user_name']
+    media_items = group_info['media_items']
+    status_message_id = group_info.get('status_message_id')
     total_items = len(media_items)
     
     if total_items == 0:
-        logger.warning(f"媒体组 {media_group_id} 没有内容")
-        
-        # 如果有状态消息，更新为错误信息
         if status_message_id:
-            try:
-                context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=status_message_id,
-                    text="❌ 未能处理任何媒体内容"
-                )
-            except Exception as e:
-                logger.error(f"更新状态消息失败: {e}")
-        
+            try: context.bot.edit_message_text(chat_id=chat_id, message_id=status_message_id, text="❌ 未能处理任何媒体内容")
+            except: pass
         with media_group_lock:
-            if collection_key in collection:
-                del collection[collection_key]
-                save_media_groups_collection(collection)
+            if collection_key in active_collections:
+                del active_collections[collection_key]
+                save_media_groups_collection()
         return
-    
-    # 直接使用初始的状态消息
-    status_message = None
+
+    # 更新状态为开始处理
     if status_message_id:
         try:
-            # 直接更新收集阶段的初始消息，显示开始处理
-            status_message = context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_message_id,
-                text=f"⏳ 正在保存媒体组：0/{total_items}"
-            )
-            logger.info(f"成功更新初始消息以开始处理阶段，消息ID: {status_message_id}")
-        except Exception as e:
-            logger.error(f"更新初始状态消息失败: {e}")
-            status_message_id = None
-    
-    # 只有在确实找不到初始消息ID时才创建新消息（这种情况应该很少发生）
-    if not status_message_id:
-        logger.warning("找不到有效的初始消息ID，将创建新消息")
-        try:
-            status_message = context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⏳ 正在保存媒体组：0/{total_items}"
-            )
-            # 保存新创建的消息ID以便后续使用
-            status_message_id = status_message.message_id
-            logger.info(f"已创建新的状态消息，ID: {status_message_id}")
-        except Exception as e:
-            logger.error(f"创建状态消息失败: {e}")
-    
-    # 创建一个用户对象以便传递给save_to_csv函数
-    user_obj = type('User', (), {'username': user_name, 'first_name': user_name})
-    
-    # 获取用户目录
-    user_dir = os.path.join(SAVE_DIR, user_name)
-    date_dir = os.path.join(user_dir, datetime.now().strftime("%Y-%m-%d"))
-    
-    # 根据来源类型决定保存目录
-    if source:
-        if source_type in ["user", "private_user", "unknown_forward"]:
-            # 用户来源统一放在"users"文件夹下
-            users_dir = os.path.join(date_dir, "users")
-            save_dir = os.path.join(users_dir, source)
-        else:
-            # 其他类型的来源（频道、群组、机器人等）直接在日期目录下创建子文件夹
-            save_dir = os.path.join(date_dir, source)
-    else:
-        save_dir = date_dir
-    
-    os.makedirs(save_dir, exist_ok=True)
+            context.bot.edit_message_text(chat_id=chat_id, message_id=status_message_id, text=f"⏳ 正在并发保存媒体组：0/{total_items}")
+        except: pass
+
+    # 准备目录
+    user_id = group_info.get('user_id')
+    user_obj = type('User', (), {'id': user_id, 'username': user_name, 'first_name': user_name})
+    source = group_info.get('source')
+    source_type = group_info.get('source_type')
+    save_dir = get_save_directory(user_obj, source, source_type)
     
     start_time = time.time()
     processed_count = 0
+    progress_lock = threading.Lock()
+    caption = group_info.get('caption')
+    skipped_duplicates = []
     
-    # 逐个处理媒体项
-    for index, media_info in enumerate(media_items, 1):
+    # 稳定进度条：使用列表记录每个项的状态
+    # 状态：0-等待中(⏳), 1-成功(✅), 2-重复(♻️), 3-失败(❌)
+    items_status = [0] * total_items
+    
+    # 预生成基础文件名（时间戳），确保文件名顺序与媒体组顺序一致
+    base_timestamp = generate_temp_filename(media_group_id)
+
+    def get_progress_bar():
+        status_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌"}
+        return "".join([status_map[s] for s in items_status])
+
+    def download_and_save_task(index, media_info):
+        nonlocal processed_count
         try:
-            # 获取媒体文件
-            file = context.bot.get_file(media_info['file_id'])
+            file_unique_id = media_info['file_unique_id']
             
-            # 生成临时文件名（不带扩展名）
-            temp_filename = generate_temp_filename(media_group_id)
-            temp_path = os.path.join(save_dir, f"{temp_filename}_temp")
-            
-            # 下载到临时文件
-            file.download(temp_path)
-            
-            # 根据媒体类型选择不同的扩展名检测函数
-            media_type = media_info.get('media_type', 'photo')
-            if media_type == 'video':
-                ext = get_video_extension(temp_path)
-            else:  # 默认为照片
-                ext = get_image_extension(temp_path)
+            # 下载前检查查重
+            dup_info = get_duplicate_info(file_unique_id)
+            if dup_info:
+                with progress_lock:
+                    skipped_duplicates.append({
+                        'index': index,
+                        'filename': dup_info['filename'],
+                        'source': dup_info['source'],
+                        'source_link': dup_info.get('source_link')
+                    })
+                    items_status[index-1] = 2 # 标记为重复
+                    processed_count += 1
+                    current_count = processed_count
                 
-            final_filename = f"{temp_filename}{ext}"
-            final_path = os.path.join(save_dir, final_filename)
+                # 更新进度条
+                if status_message_id and current_count % 2 == 0: 
+                    try:
+                        context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=status_message_id,
+                            text=f"正在保存媒体组...\n进度: {get_progress_bar()} ({current_count}/{total_items})"
+                        )
+                    except: pass
+                return True
+
+            file = context.bot.get_file(media_info['file_id'])
+            # 使用预生成的 base_timestamp 和 index，保证文件名在本地排序时是有序的
+            temp_path = os.path.join(save_dir, f"{base_timestamp}_temp_{index}")
             
-            # 重命名为正确的扩展名
+            # 使用带重试的下载
+            download_with_retry(file, temp_path)
+            
+            media_type = media_info.get('media_type', 'photo')
+            ext = get_video_extension(temp_path) if media_type == 'video' else get_image_extension(temp_path)
+            
+            # 最终文件名为 时间戳_序号.后缀
+            final_filename = f"{base_timestamp}_{index}{ext}"
+            final_path = os.path.join(save_dir, final_filename)
             os.rename(temp_path, final_path)
             
-            processed_count += 1
+            # 保存元数据
+            media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': media_info['file_unique_id']})
+            save_to_db(user_obj, media_obj_stub, final_filename, 
+                        media_group_id=media_group_id, 
+                        media_type=media_type, 
+                        caption=caption,
+                        source=source, 
+                        source_id=group_info.get('source_id'), 
+                        source_link=group_info.get('source_link'), 
+                        source_type=source_type)
             
-            # 创建媒体对象以便保存元数据
-            media_obj = type('Media', (), {
-                'file_id': media_info['file_id'],
-                'file_unique_id': media_info['file_unique_id'],
-                'media_type': media_type
-            })
+            with progress_lock:
+                items_status[index-1] = 1 # 标记为成功
+                processed_count += 1
+                current_count = processed_count
             
-            # 保存元数据到CSV
-            save_to_csv(user_obj, media_obj, final_filename, media_group_id, media_type, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
-            
-            # 更新状态消息 - 每个媒体项都更新一次
-            try:
-                if status_message_id:
+            # 每完成几个就更新一次进度
+            if status_message_id and (current_count == total_items or current_count % 2 == 0):
+                try:
                     context.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=status_message_id,
-                        text=f"⏳ 正在保存媒体组：{index}/{total_items}"
+                        text=f"正在保存媒体组...\n进度: {get_progress_bar()} ({current_count}/{total_items})"
                     )
-            except Exception as e:
-                logger.error(f"更新进度消息失败: {e}")
+                except: pass
             
-            logger.info(f"已保存媒体组{media_type} ({index}/{total_items}): {final_path}")
-            
+            return True
         except Exception as e:
-            logger.error(f"保存媒体组{media_info.get('media_type', '内容')}失败: {e}")
+            logger.error(f"媒体项 {index} 下载失败: {e}")
+            with progress_lock:
+                items_status[index-1] = 3 # 标记为失败
+                processed_count += 1
+            return False
+    futures = [download_executor.submit(download_and_save_task, i, item) for i, item in enumerate(media_items, 1)]
+    results = [f.result() for f in futures]
     
-    # 处理完成，更新状态消息
     elapsed_time = time.time() - start_time
-    try:
-        if status_message_id:
+    success_count = sum(1 for r in results if r)
+    actual_downloaded = success_count - len(skipped_duplicates)
+    
+    if status_message_id:
+        try:
+            finish_text = f"✅ 媒体组保存完成！({success_count}/{total_items}个项，用时{elapsed_time:.1f}秒)\n"
+            finish_text += f"结果: {get_progress_bar()}\n"
+            if skipped_duplicates:
+                # 按照媒体在组中的原始顺序排序
+                skipped_duplicates.sort(key=lambda x: x['index'])
+                finish_text += f"♻️ 跳过了 {len(skipped_duplicates)} 个重复资源:\n"
+                for dup in skipped_duplicates: # 移除5条限制，列出全部
+                    source_display = dup['source']
+                    if dup.get('source_link'):
+                        source_display = f"[{dup['source']}]({dup['source_link']})"
+                    finish_text += f" - 第{dup['index']}项 -> `{dup['filename']}` (来源: {source_display})\n"
+            
             context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_message_id,
-                text=f"✅ 媒体组保存完成！({processed_count}/{total_items}个文件，用时{elapsed_time:.1f}秒)"
+                text=finish_text,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
             )
-    except Exception as e:
-        logger.error(f"更新完成消息失败: {e}")
+        except: pass
     
-    logger.info(f"媒体组 {media_group_id} 处理完成，共 {processed_count}/{total_items} 个文件")
-    
-    # 清理收集状态
+    # 清理内存中的收集状态并同步到磁盘
     with media_group_lock:
-        collection = load_media_groups_collection()
-        if collection_key in collection:
-            del collection[collection_key]
-            save_media_groups_collection(collection)
+        if collection_key in active_collections:
+            del active_collections[collection_key]
+            save_media_groups_collection()
 
 @restricted
 def process_photo(update: Update, context: CallbackContext) -> None:
@@ -546,6 +553,25 @@ def process_photo(update: Update, context: CallbackContext) -> None:
         
         # 获取图片
         photo = message.photo[-1]
+        
+        # 检查是否重复
+        dup_info = get_duplicate_info(photo.file_unique_id)
+        if dup_info:
+            current_caption = message.caption or "无"
+            source_display = dup_info['source']
+            if dup_info.get('source_link'):
+                source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
+                
+            reply_msg = (
+                f"♻️ **检测到重复资源 (单张图片)**\n\n"
+                f"文件已存在: `{dup_info['filename']}`\n"
+                f"最初来源: {source_display}\n"
+                f"最初描述: {dup_info['caption'] or '无'}\n"
+                f"当前描述: {current_caption}"
+            )
+            update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
+            return
+
         photo_file = photo.get_file()
         
         # 生成临时文件名（不带扩展名）
@@ -564,8 +590,8 @@ def process_photo(update: Update, context: CallbackContext) -> None:
             # 重命名为正确的扩展名
             os.rename(temp_path, final_path)
             
-            # 保存元数据到CSV
-            save_to_csv(user, photo, final_filename, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+            # 保存元数据到数据库
+            save_to_db(user, photo, final_filename, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             logger.info(f"已保存单张图片: {final_path}")
             
@@ -616,6 +642,25 @@ def process_video(update: Update, context: CallbackContext) -> None:
         
         # 获取视频
         video = message.video
+        
+        # 检查是否重复
+        dup_info = get_duplicate_info(video.file_unique_id)
+        if dup_info:
+            current_caption = message.caption or "无"
+            source_display = dup_info['source']
+            if dup_info.get('source_link'):
+                source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
+
+            reply_msg = (
+                f"♻️ **检测到重复资源 (单个视频)**\n\n"
+                f"文件已存在: `{dup_info['filename']}`\n"
+                f"最初来源: {source_display}\n"
+                f"最初描述: {dup_info['caption'] or '无'}\n"
+                f"当前描述: {current_caption}"
+            )
+            update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
+            return
+
         video_file = video.get_file()
         
         # 生成临时文件名（不带扩展名）
@@ -634,8 +679,8 @@ def process_video(update: Update, context: CallbackContext) -> None:
             # 重命名为正确的扩展名
             os.rename(temp_path, final_path)
             
-            # 保存元数据到CSV
-            save_to_csv(user, video, final_filename, media_type='video', source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+            # 保存元数据到数据库
+            save_to_db(user, video, final_filename, media_type='video', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             logger.info(f"已保存单个视频: {final_path}")
             
@@ -688,6 +733,24 @@ def download_document(update: Update, context: CallbackContext) -> None:
     # 获取文件
     file = document.get_file()
     
+    # 检查是否重复
+    dup_info = get_duplicate_info(document.file_unique_id)
+    if dup_info:
+        current_caption = message.caption or "无"
+        source_display = dup_info['source']
+        if dup_info.get('source_link'):
+            source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
+
+        reply_msg = (
+            f"♻️ **检测到重复资源 (图片文件)**\n\n"
+            f"文件已存在: `{dup_info['filename']}`\n"
+            f"最初来源: {source_display}\n"
+            f"最初描述: {dup_info['caption'] or '无'}\n"
+            f"当前描述: {current_caption}"
+        )
+        update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
+        return
+    
     # 处理文件名
     original_name = document.file_name
     timestamp = int(time.time() * 1000)  # 毫秒级时间戳
@@ -721,12 +784,12 @@ def download_document(update: Update, context: CallbackContext) -> None:
         # 重命名为最终文件名
         os.rename(temp_path, final_path)
         
-        # 保存元数据到CSV
+        # 保存元数据到数据库
         photo_obj = type('Photo', (), {
             'file_id': document.file_id,
             'file_unique_id': document.file_unique_id
         })
-        save_to_csv(user, photo_obj, final_filename, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+        save_to_db(user, photo_obj, final_filename, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
         
         logger.info(f"已保存文件: {final_path}")
         
@@ -760,6 +823,24 @@ def process_animation(update: Update, context: CallbackContext) -> None:
     
     # 获取动画文件
     animation_file = animation.get_file()
+    
+    # 检查是否重复
+    dup_info = get_duplicate_info(animation.file_unique_id)
+    if dup_info:
+        current_caption = message.caption or "无"
+        source_display = dup_info['source']
+        if dup_info.get('source_link'):
+            source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
+
+        reply_msg = (
+            f"♻️ **检测到重复资源 (GIF动画)**\n\n"
+            f"文件已存在: `{dup_info['filename']}`\n"
+            f"最初来源: {source_display}\n"
+            f"最初描述: {dup_info['caption'] or '无'}\n"
+            f"当前描述: {current_caption}"
+        )
+        update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
+        return
     
     # 生成临时文件名（不带扩展名）
     temp_filename = generate_temp_filename()
@@ -795,12 +876,12 @@ def process_animation(update: Update, context: CallbackContext) -> None:
         # 重命名为最终文件名
         os.rename(temp_path, final_path)
         
-        # 保存元数据到CSV
+        # 保存元数据到数据库
         animation_obj = type('Animation', (), {
             'file_id': animation.file_id,
             'file_unique_id': animation.file_unique_id
         })
-        save_to_csv(user, animation_obj, final_filename, media_type='animation', source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+        save_to_db(user, animation_obj, final_filename, media_type='animation', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
         
         logger.info(f"已保存GIF动画: {final_path}")
         
@@ -923,6 +1004,9 @@ def main() -> None:
         else:
             updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
             
+        # 加载初始收集状态
+        load_media_groups_collection()
+        
         # 获取调度程序
         dispatcher = updater.dispatcher
         

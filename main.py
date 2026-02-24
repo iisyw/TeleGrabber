@@ -14,12 +14,17 @@ import telegram.error
 
 from config import TOKEN, logger, get_connection_args
 import bot
+from utils import init_db
 
 def main() -> None:
     """主程序入口"""
     if not TOKEN:
         logger.error("请在.env文件中设置TELEGRAM_BOT_TOKEN环境变量")
         return
+        
+    # 初始化数据库和状态
+    init_db()
+    bot.load_media_groups_collection()
         
     # 重试机制
     max_retries = 5

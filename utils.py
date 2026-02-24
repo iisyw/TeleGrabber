@@ -9,52 +9,37 @@ import imghdr
 from datetime import datetime
 import logging
 import mimetypes
+import re
+import sqlite3
 
 from config import SAVE_DIR
 
 logger = logging.getLogger(__name__)
 
 def get_save_directory(user, source=None, source_type=None):
-    """创建并返回保存目录路径
+    """创建并返回保存目录路径 (统一媒体库版)
     
     Args:
         user: Telegram用户对象
-        source: 可选的来源信息（如转发来源的频道名或ID）
-        source_type: 可选的来源类型（如channel, group, user, bot等）
+        source: 可选的来源信息
+        source_type: 可选的来源类型
         
     Returns:
         str: 保存目录的完整路径
     """
-    # 创建以用户名命名的子文件夹
-    user_dir = os.path.join(SAVE_DIR, f"{user.username or user.first_name}")
-    if not os.path.exists(user_dir):
-        os.makedirs(user_dir)
-    
-    # 创建以日期命名的子文件夹
-    date_dir = os.path.join(user_dir, datetime.now().strftime("%Y-%m-%d"))
-    if not os.path.exists(date_dir):
-        os.makedirs(date_dir)
-    
-    # 如果没有提供来源信息，直接返回日期目录
+    # 如果没有来源信息，统一存放在 unsorted 目录
     if not source:
-        return date_dir
-    
-    # 根据来源类型决定保存路径
-    if source_type in ["user", "private_user", "unknown_forward"]:
-        # 用户来源统一放在"users"文件夹下
-        users_dir = os.path.join(date_dir, "users")
-        if not os.path.exists(users_dir):
-            os.makedirs(users_dir)
-        
-        # 在users目录下创建特定用户的子文件夹
-        source_dir = os.path.join(users_dir, source)
+        source_dir = os.path.join(SAVE_DIR, "unsorted")
+    elif source_type in ["user", "private_user", "unknown_forward"]:
+        # 用户来源统一放在 direct_messages 目录
+        source_dir = os.path.join(SAVE_DIR, "direct_messages", source)
     else:
-        # 其他类型的来源（频道、群组、机器人等）直接在日期目录下创建子文件夹
-        source_dir = os.path.join(date_dir, source)
+        # 频道、群组等，直接在 downloads 下创建来源文件夹
+        source_dir = os.path.join(SAVE_DIR, source)
     
     # 确保目录存在
     if not os.path.exists(source_dir):
-        os.makedirs(source_dir)
+        os.makedirs(source_dir, exist_ok=True)
     
     return source_dir
 
@@ -168,60 +153,99 @@ def generate_filename(photo_obj, media_group_id=None):
     short_id = get_short_id(media_group_id)
     return f"{short_id}_{timestamp}.jpg"
 
-def save_to_csv(user, media_obj, file_name, media_group_id=None, media_type='photo', source=None, source_id=None, source_link=None, source_type=None):
-    """将媒体元数据保存到CSV文件
+DB_PATH = os.path.join(SAVE_DIR, "telegrabber.db")
+
+def init_db():
+    """初始化数据库 (含用户信息字段)"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS media_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            user_name TEXT,
+            filename TEXT,
+            datetime TEXT,
+            file_id TEXT,
+            file_unique_id TEXT UNIQUE,
+            media_group_id TEXT,
+            media_type TEXT,
+            caption TEXT,
+            source TEXT,
+            source_id TEXT,
+            source_link TEXT,
+            source_type TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_db_connection():
+    """获取数据库连接"""
+    return sqlite3.connect(DB_PATH)
+
+def get_duplicate_info(file_unique_id):
+    """根据 unique_id 查找重复项"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT filename, source, caption, source_link FROM media_metadata WHERE file_unique_id = ?
+    ''', (file_unique_id,))
+    result = cursor.fetchone()
+    conn.close()
     
-    Args:
-        user: Telegram用户对象
-        media_obj: Telegram媒体对象 (照片/视频)
-        file_name: 保存的文件名
-        media_group_id: 可选的媒体组ID
-        media_type: 媒体类型 ('photo' 或 'video')
-        source: 可选的来源信息（如转发来源的频道名或ID）
-        source_id: 可选的来源ID（如频道ID或用户ID）
-        source_link: 可选的来源链接（如频道链接或用户链接）
-        source_type: 可选的来源类型（如channel, group, user, bot等）
-    """
-    # 获取用户目录
-    user_dir = os.path.join(SAVE_DIR, f"{user.username or user.first_name}")
-    if not os.path.exists(user_dir):
-        os.makedirs(user_dir)
-        
-    # 获取日期目录
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    date_dir = os.path.join(user_dir, date_str)
-    if not os.path.exists(date_dir):
-        os.makedirs(date_dir)
-    
-    # CSV文件保存在日期目录下，而不是用户目录下
-    csv_path = os.path.join(date_dir, "metadata.csv")
-    
-    # 检查CSV是否存在，不存在则创建并写入表头
-    file_exists = os.path.isfile(csv_path)
+    if result:
+        return {
+            'filename': result[0],
+            'source': result[1],
+            'caption': result[2],
+            'source_link': result[3]
+        }
+    return None
+
+def save_to_db(user, media_obj, file_name, media_group_id=None, media_type='photo', caption=None, source=None, source_id=None, source_link=None, source_type=None):
+    """将媒体元数据保存到SQLite数据库"""
+    # 清洗标题：将换行替换为空格，并将多个空格合并为一个
+    if caption:
+        caption = caption.replace('\n', ' ').replace('\r', ' ')
+        caption = re.sub(r'\s+', ' ', caption).strip()
+    else:
+        caption = ''
     
     try:
-        with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['filename', 'datetime', 'file_id', 'file_unique_id', 'media_group_id', 'media_type', 'source', 'source_id', 'source_link', 'source_type']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            
-            if not file_exists:
-                writer.writeheader()
-            
-            writer.writerow({
-                'filename': file_name,
-                'datetime': datetime.now().isoformat(),
-                'file_id': media_obj.file_id,
-                'file_unique_id': media_obj.file_unique_id,
-                'media_group_id': media_group_id or '',
-                'media_type': media_type,
-                'source': source or '',
-                'source_id': source_id or '',
-                'source_link': source_link or '',
-                'source_type': source_type or 'unknown'
-            })
-            logger.debug(f"已将{media_type}元数据保存至CSV: {csv_path}")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO media_metadata (
+                user_id, user_name, filename, datetime, file_id, file_unique_id, 
+                media_group_id, media_type, caption, source, source_id, 
+                source_link, source_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user.id,
+            user.username or user.first_name,
+            file_name,
+            datetime.now().isoformat(),
+            media_obj.file_id,
+            media_obj.file_unique_id,
+            media_group_id or '',
+            media_type,
+            caption,
+            source or '',
+            source_id or '',
+            source_link or '',
+            source_type or 'unknown'
+        ))
+        conn.commit()
+        conn.close()
+        logger.debug(f"已将{media_type}元数据保存至数据库")
+        return True
+    except sqlite3.IntegrityError:
+        logger.warning(f"检测到重复的 file_unique_id: {media_obj.file_unique_id}")
+        return False
     except Exception as e:
-        logger.error(f"保存元数据到CSV失败: {e}")
+        logger.error(f"保存元数据到数据库失败: {e}")
+        return False
 
 def get_mime_type(document):
     """获取文档的MIME类型
