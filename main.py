@@ -96,4 +96,7 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         logger.info("程序被用户中断")
-        sys.exit(0) 
+    finally:
+        if USER_API_ENABLED:
+            user_api.stop_user_api()
+        sys.exit(0)

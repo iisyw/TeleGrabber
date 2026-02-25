@@ -741,7 +741,7 @@ def process_photo(update: Update, context: CallbackContext) -> None:
             os.rename(temp_path, final_path)
             
             # 保存元数据到数据库
-            save_to_db(user, photo, final_filename, save_dir=save_dir, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+            save_to_db(user, photo, final_filename, save_dir=date_dir, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             logger.info(f"已保存单张图片: {final_path}")
             
@@ -871,7 +871,7 @@ def process_video(update: Update, context: CallbackContext) -> None:
             os.rename(temp_path, final_path)
             
             # 保存元数据到数据库
-            save_to_db(user, video, final_filename, save_dir=save_dir, media_type='video', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+            save_to_db(user, video, final_filename, save_dir=date_dir, media_type='video', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             logger.info(f"已保存单个视频: {final_path}")
             
@@ -980,7 +980,7 @@ def download_document(update: Update, context: CallbackContext) -> None:
             'file_id': document.file_id,
             'file_unique_id': document.file_unique_id
         })
-        save_to_db(user, photo_obj, final_filename, save_dir=save_dir, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+        save_to_db(user, photo_obj, final_filename, save_dir=date_dir, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
         
         logger.info(f"已保存文件: {final_path}")
         
@@ -1114,7 +1114,7 @@ def process_animation(update: Update, context: CallbackContext) -> None:
             'file_id': animation.file_id,
             'file_unique_id': animation.file_unique_id
         })
-        save_to_db(user, animation_obj, final_filename, save_dir=save_dir, media_type='animation', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+        save_to_db(user, animation_obj, final_filename, save_dir=date_dir, media_type='animation', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
         
         logger.info(f"已保存GIF动画: {final_path}")
         

@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 # 降低APScheduler的日志级别，减少输出
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
+# 针对 Pyrogram 内部一些会自动记录但我们已经通过重试机制处理的错误，降低其日志级别
+logging.getLogger('pyrogram').setLevel(logging.WARNING)
 
 # 加载环境变量
 load_dotenv()
@@ -23,6 +25,7 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 SAVE_DIR = os.getenv('SAVE_DIR', 'downloads')
 PROXY = os.getenv('PROXY_URL')  # 可选的代理设置
 TIMEOUT = int(os.getenv('CONNECTION_TIMEOUT', '30'))  # 连接超时设置，默认30秒
+DOWNLOAD_RETRIES = int(os.getenv('DOWNLOAD_RETRIES', '3'))  # 下载失败重试次数，默认3次
 
 # 允许使用机器人的用户列表
 # 格式为逗号分隔的用户名或用户ID列表，例如: user1,user2,123456789
