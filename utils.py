@@ -203,8 +203,8 @@ def get_duplicate_info(file_unique_id):
         }
     return None
 
-def save_to_db(user, media_obj, file_name, media_group_id=None, media_type='photo', caption=None, source=None, source_id=None, source_link=None, source_type=None):
-    """将媒体元数据保存到SQLite数据库"""
+def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, media_type='photo', caption=None, source=None, source_id=None, source_link=None, source_type=None):
+    """将媒体元数据保存到SQLite数据库，并同步追加到本地 CSV 作为物理备份"""
     # 清洗标题：将换行替换为空格，并将多个空格合并为一个
     if caption:
         caption = caption.replace('\n', ' ').replace('\r', ' ')
@@ -239,6 +239,41 @@ def save_to_db(user, media_obj, file_name, media_group_id=None, media_type='phot
         conn.commit()
         conn.close()
         logger.debug(f"已将{media_type}元数据保存至数据库")
+        
+        # 同步保存到本地 CSV 作为物理备份 (如果指定了 save_dir)
+        if save_dir:
+            try:
+                csv_path = os.path.join(save_dir, "metadata.csv")
+                file_exists = os.path.isfile(csv_path)
+                
+                headers = [
+                    'filename', 'datetime', 'file_id', 'file_unique_id', 
+                    'media_group_id', 'media_type', 'caption', 'source', 
+                    'source_id', 'source_link', 'source_type'
+                ]
+                
+                with open(csv_path, 'a', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.DictWriter(f, fieldnames=headers)
+                    if not file_exists:
+                        writer.writeheader()
+                    
+                    writer.writerow({
+                        'filename': file_name,
+                        'datetime': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'file_id': media_obj.file_id,
+                        'file_unique_id': media_obj.file_unique_id,
+                        'media_group_id': media_group_id or '',
+                        'media_type': media_type,
+                        'caption': caption,
+                        'source': source or '',
+                        'source_id': source_id or '',
+                        'source_link': source_link or '',
+                        'source_type': source_type or 'unknown'
+                    })
+                logger.debug(f"已同步追加 CSV 备份: {csv_path}")
+            except Exception as e:
+                logger.error(f"同步 CSV 备份失败: {e}")
+
         return True
     except sqlite3.IntegrityError:
         logger.warning(f"检测到重复的 file_unique_id: {media_obj.file_unique_id}")

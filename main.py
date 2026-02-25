@@ -9,12 +9,14 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API
 import sys
 import time
 import logging
+import threading
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 import telegram.error
 
-from config import TOKEN, logger, get_connection_args
+from config import TOKEN, logger, get_connection_args, USER_API_ENABLED
 import bot
 from utils import init_db
+import user_api
 
 def main() -> None:
     """主程序入口"""
@@ -25,6 +27,14 @@ def main() -> None:
     # 初始化数据库和状态
     init_db()
     bot.load_media_groups_collection()
+    
+    # 预启动 User API (如果启用)
+    if USER_API_ENABLED:
+        logger.info("检测到 API 凭据，准备初始化 User API (MTProto)...")
+        # 使用线程启动，防止因为首次登录需要输入手机号/验证码而阻塞机器人启动
+        user_api_thread = threading.Thread(target=user_api.start_user_api, daemon=True)
+        user_api_thread.start()
+        logger.info("User API 初始化已在后台启动，如需登录请关注终端提示")
         
     # 重试机制
     max_retries = 5

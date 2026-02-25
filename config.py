@@ -32,6 +32,17 @@ ALLOWED_USERS = [user.strip() for user in ALLOWED_USERS_STR.split(',') if user.s
 # 是否启用用户限制功能，如果ALLOWED_USERS为空，则默认不启用
 ENABLE_USER_RESTRICTION = bool(ALLOWED_USERS)
 
+# Telegram API (MTProto) 配置
+API_ID = os.getenv('TELEGRAM_API_ID')
+API_HASH = os.getenv('TELEGRAM_API_HASH')
+# 是否启用 User API (只有当提供 ID 和 HASH 时才启用)
+USER_API_ENABLED = bool(API_ID and API_HASH)
+
+if USER_API_ENABLED:
+    logger.info("User API (MTProto) 已配置，支持大文件下载 (>20MB)")
+else:
+    logger.warning("User API (MTProto) 未配置，无法下载超过 20MB 的文件")
+
 # GitHub仓库地址
 GITHUB_REPO = "https://github.com/iisyw/TeleGrabber"
 

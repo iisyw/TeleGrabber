@@ -16,4 +16,11 @@ downloads/
 
 # 临时文件
 *.tmp
-.DS_Store 
+.DS_Store
+
+# Pyrogram 会话文件 (包含敏感登录凭据，切勿上传)
+*.session
+*.session-journal
+
+# SQLite 数据库
+*.db

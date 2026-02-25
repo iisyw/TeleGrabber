@@ -21,13 +21,15 @@ from telegram import Update, Message
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from telegram.ext import JobQueue
 
-from config import logger, SAVE_DIR, ALLOWED_USERS, ENABLE_USER_RESTRICTION, GITHUB_REPO
-from utils import (
-    get_save_directory, generate_filename, save_to_db, get_short_id,
-    generate_temp_filename, get_image_extension, get_video_extension,
-    get_duplicate_info
+from config import (
+    logger, SAVE_DIR, ALLOWED_USERS, ENABLE_USER_RESTRICTION, 
+    GITHUB_REPO, USER_API_ENABLED
 )
-
+from utils import (
+    get_save_directory, generate_temp_filename, get_image_extension, 
+    get_video_extension, save_to_db, get_duplicate_info, DB_PATH
+)
+import user_api
 # 媒体组状态文件
 MEDIA_GROUP_STATE_FILE = os.path.join(SAVE_DIR, "media_groups_state.json")
 # 媒体组收集状态文件
@@ -51,7 +53,8 @@ is_processing_media_group = False
 # 在内存中存储当前正在收集的媒体组，减少磁盘 I/O
 # 格式: {collection_key: group_info_dict}
 active_collections = {}
-# 用于并行下载的线程池
+# 并发下载执行器 (推荐 10-20 以匹配集群带宽)
+# 下载执行器：限制为 5 个并发，既能保证速度也能避免触发 Telegram 限制或代理过载
 download_executor = ThreadPoolExecutor(max_workers=5)
 # --- 内存缓存优化结束 ---
 
@@ -202,20 +205,34 @@ def save_media_groups_collection(collection=None):
 def add_photo_to_collection(media_group_id, chat_id, user, photo, context=None, message=None):
     """将照片添加到媒体组收集中"""
     # 获取转发来源
-    source, source_id, source_link, source_type = get_forward_source_info(message)
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
     
-    # 修改为调用通用函数
-    return add_media_to_collection(media_group_id, chat_id, user, photo, "photo", context, message, source, source_id, source_link, source_type)
+    if media_group_id:
+        return add_media_to_collection(
+            media_group_id, chat_id, user, photo, 'photo', context, message, 
+            source, source_id, source_link, source_type,
+            chat_type=message.chat.type if message else None,
+            orig_chat_id=orig_chat_id,
+            orig_msg_id=orig_msg_id
+        )
 
 def add_video_to_collection(media_group_id, chat_id, user, video, context=None, message=None):
     """将视频添加到媒体组收集中"""
     # 获取转发来源
-    source, source_id, source_link, source_type = get_forward_source_info(message)
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
     
-    # 修改为调用通用函数
-    return add_media_to_collection(media_group_id, chat_id, user, video, "video", context, message, source, source_id, source_link, source_type)
+    if media_group_id:
+        return add_media_to_collection(
+            media_group_id, chat_id, user, video, 'video', context, message, 
+            source, source_id, source_link, source_type,
+            chat_type=message.chat.type if message else None,
+            orig_chat_id=orig_chat_id,
+            orig_msg_id=orig_msg_id
+        )
 
-def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None, source=None, source_id=None, source_link=None, source_type=None):
+def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None, 
+                           source=None, source_id=None, source_link=None, source_type=None, 
+                           chat_type=None, orig_chat_id=None, orig_msg_id=None):
     """将媒体（照片或视频）添加到媒体组收集中 (优化版：优先操作内存)"""
     with media_group_lock:
         collection_key = f"{chat_id}_{media_group_id}"
@@ -223,7 +240,11 @@ def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type
         media_info = {
             'file_id': media_obj.file_id,
             'file_unique_id': media_obj.file_unique_id,
-            'media_type': media_type
+            'media_type': media_type,
+            'message_id': message.message_id if message else None,
+            'file_size': getattr(media_obj, 'file_size', 0),
+            'orig_chat_id': orig_chat_id,
+            'orig_msg_id': orig_msg_id
         }
         
         is_first_media = collection_key not in active_collections
@@ -248,6 +269,7 @@ def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type
                 'source_id': source_id,
                 'source_link': source_link,
                 'source_type': source_type,
+                'chat_type': chat_type or (message.chat.type if message else None),
                 'caption': message.caption if message else None
             }
             logger.info(f"开始收集媒体组 {media_group_id}，消息ID: {status_message_id}")
@@ -408,16 +430,42 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
     caption = group_info.get('caption')
     skipped_duplicates = []
     
-    # 稳定进度条：使用列表记录每个项的状态
-    # 状态：0-等待中(⏳), 1-成功(✅), 2-重复(♻️), 3-失败(❌)
+    # 状态：0-等待中(⏳), 1-成功(✅), 2-重复(♻️), 3-失败(❌), 4-下载中(⬇️)
     items_status = [0] * total_items
+    item_progress = [0] * total_items # 记录每个项的下载进度(0-99)
     
-    # 预生成基础文件名（时间戳），确保文件名顺序与媒体组顺序一致
+    # 预生成基础文件名（时间戳）
     base_timestamp = generate_temp_filename(media_group_id)
+    
+    # 记录上次 UI 更新时间
+    last_ui_update = {"time": 0} 
 
     def get_progress_bar():
-        status_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌"}
-        return "".join([status_map[s] for s in items_status])
+        status_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌", 4: "⬇️"}
+        res = []
+        for i, s in enumerate(items_status):
+            if s == 4: # 正在下载，显示百分比
+                res.append(f"⬇️{item_progress[i]}%")
+            else:
+                res.append(status_map.get(s, "❓"))
+        return "".join(res)
+
+    def update_ui_async():
+        """非阻塞地更新机器人状态消息"""
+        curr_time = time.time()
+        # 控制更新频率，至少间隔 1.2 秒 (Bot API 有频率限制，不能太快)
+        if curr_time - last_ui_update["time"] > 1.2:
+            last_ui_update["time"] = curr_time
+            def _do_update():
+                try:
+                    context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=status_message_id,
+                        text=f"正在保存媒体组...\n进度: {get_progress_bar()} ({processed_count}/{total_items})"
+                    )
+                except: pass
+            # 开启新线程更新，绝对不阻塞 User API 的事件循环
+            threading.Thread(target=_do_update, daemon=True).start()
 
     def download_and_save_task(index, media_info):
         nonlocal processed_count
@@ -449,6 +497,79 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
                     except: pass
                 return True
 
+            file_size = media_info.get('file_size', 0)
+            
+            # 如果启用了 User API 且文件较大 (>20MB) 或者 Bot API 明确提示无法下载
+            if USER_API_ENABLED and file_size >= 20 * 1024 * 1024:
+                # 使用 User API 下载
+                temp_filename = base_timestamp
+                ext = ".mp4" if media_info.get('media_type') == 'video' else ".jpg"
+                final_filename = f"{temp_filename}_{index}{ext}"
+                final_path = os.path.join(save_dir, final_filename)
+                
+                logger.info(f"文件较大 ({file_size/1024/1024:.1f}MB)，切换至 User API 下载: {index}")
+                
+                with progress_lock:
+                    items_status[index-1] = 4 # 标记为下载中 (⬇️)
+                    item_progress[index-1] = 0 # 初始 0%
+
+                def p_callback(current, total):
+                    if total > 0:
+                        percent = int(current * 100 / total)
+                        # 只有百分比变了才触发 UI 更新
+                        if percent != item_progress[index-1]:
+                            with progress_lock:
+                                item_progress[index-1] = percent
+                            update_ui_async()
+                    else:
+                        update_ui_async()
+
+                # 溯源修复：优先使用原始频道的 ID 和 消息 ID
+                orig_chat_id = media_info.get('orig_chat_id')
+                orig_msg_id = media_info.get('orig_msg_id')
+                
+                target_chat_id = orig_chat_id or chat_id
+                target_msg_id = orig_msg_id or media_info['message_id']
+                
+                if not orig_chat_id:
+                    # 私聊映射
+                    chat_type = group_info.get('chat_type')
+                    if chat_type == 'private' or source_type in ["user", "private_user"]:
+                        # User API 看到自己发给机器人的消息是存放在跟机器人的对话中的
+                        target_chat_id = context.bot.username or context.bot.id
+
+                logger.info(f"媒体项 {index} User API 开始任务")
+                u_start = time.time()
+                success = user_api.run_download_large_file(
+                    target_chat_id, 
+                    target_msg_id, 
+                    final_path, 
+                    progress_callback=p_callback
+                )
+                u_end = time.time()
+                logger.info(f"媒体项 {index} User API 任务结束, 用时: {u_end - u_start:.1f}秒")
+                
+                if success:
+                    # 保存元数据 (User API 下载完后也要存库)
+                    media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': media_info['file_unique_id']})
+                    save_to_db(user_obj, media_obj_stub, final_filename, 
+                                save_dir=save_dir,
+                                media_group_id=media_group_id, 
+                                media_type=media_info.get('media_type', 'photo'), 
+                                caption=caption,
+                                source=source, 
+                                source_id=group_info.get('source_id'), 
+                                source_link=group_info.get('source_link'), 
+                                source_type=source_type)
+                    
+                    with progress_lock:
+                        items_status[index-1] = 1
+                        processed_count += 1
+                    update_ui_async()
+                    return True
+                else:
+                    raise Exception("User API 下载失败")
+
             file = context.bot.get_file(media_info['file_id'])
             # 使用预生成的 base_timestamp 和 index，保证文件名在本地排序时是有序的
             temp_path = os.path.join(save_dir, f"{base_timestamp}_temp_{index}")
@@ -467,6 +588,7 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
             # 保存元数据
             media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': media_info['file_unique_id']})
             save_to_db(user_obj, media_obj_stub, final_filename, 
+                        save_dir=save_dir,
                         media_group_id=media_group_id, 
                         media_type=media_type, 
                         caption=caption,
@@ -478,18 +600,7 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
             with progress_lock:
                 items_status[index-1] = 1 # 标记为成功
                 processed_count += 1
-                current_count = processed_count
-            
-            # 每完成几个就更新一次进度
-            if status_message_id and (current_count == total_items or current_count % 2 == 0):
-                try:
-                    context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=status_message_id,
-                        text=f"正在保存媒体组...\n进度: {get_progress_bar()} ({current_count}/{total_items})"
-                    )
-                except: pass
-            
+            update_ui_async()
             return True
         except Exception as e:
             logger.error(f"媒体项 {index} 下载失败: {e}")
@@ -541,7 +652,7 @@ def process_photo(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     
     # 获取转发来源
-    source, source_id, source_link, source_type = get_forward_source_info(message)
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
     
     # 检查是否为媒体组的一部分
     media_group_id = message.media_group_id
@@ -572,6 +683,45 @@ def process_photo(update: Update, context: CallbackContext) -> None:
             update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
             return
 
+        # 检查文件大小 (照片通常不会超过20MB，但为了统一逻辑加上)
+        file_size = photo.file_size or 0
+        if USER_API_ENABLED and file_size >= 20 * 1024 * 1024:
+            update.message.reply_text(f"⏳ 检测到大图片 ({file_size/1024/1024:.1f}MB)，正在通过 User API 下载...")
+            temp_filename = generate_temp_filename()
+            ext = ".jpg"
+            final_filename = f"{temp_filename}{ext}"
+            final_path = os.path.join(date_dir, final_filename)
+            
+            # 溯源修复：优先使用原始频道的 ID 和 消息 ID，这能百分百保证内容准确
+            target_chat_id = orig_chat_id or update.effective_chat.id
+            target_msg_id = orig_msg_id or update.message.message_id
+            
+            if not orig_chat_id:
+                # 如果没有溯源 ID，且是私聊，则映射到机器人在 User API 视角的 Peer
+                if update.effective_chat.type == 'private' or source_type in ["user", "private_user"]:
+                    target_chat_id = context.bot.username or context.bot.id
+
+            success = user_api.run_download_large_file(
+                target_chat_id,
+                target_msg_id,
+                final_path
+            )
+            
+            if success:
+                save_to_db(user, photo, final_filename, 
+                            save_dir=date_dir,
+                            media_type='photo', 
+                            caption=message.caption,
+                            source=source, 
+                            source_id=source_id, 
+                            source_link=source_link, 
+                            source_type=source_type)
+                update.message.reply_text(f"✅ 大图片保存完成: `{final_filename}`", parse_mode='Markdown')
+                return
+            else:
+                update.message.reply_text("❌ 大图片通过 User API 下载失败")
+                return
+                
         photo_file = photo.get_file()
         
         # 生成临时文件名（不带扩展名）
@@ -591,7 +741,7 @@ def process_photo(update: Update, context: CallbackContext) -> None:
             os.rename(temp_path, final_path)
             
             # 保存元数据到数据库
-            save_to_db(user, photo, final_filename, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+            save_to_db(user, photo, final_filename, save_dir=save_dir, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             logger.info(f"已保存单张图片: {final_path}")
             
@@ -630,7 +780,7 @@ def process_video(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     
     # 获取转发来源
-    source, source_id, source_link, source_type = get_forward_source_info(message)
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
     
     # 检查是否为媒体组的一部分
     media_group_id = message.media_group_id
@@ -661,6 +811,47 @@ def process_video(update: Update, context: CallbackContext) -> None:
             update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
             return
 
+        # 检查文件大小
+        file_size = video.file_size or 0
+        if USER_API_ENABLED and file_size >= 20 * 1024 * 1024:
+            # 使用 User API 下载
+            update.message.reply_text(f"⏳ 检测到大视频 ({file_size/1024/1024:.1f}MB)，正在通过 User API 下载...")
+            
+            temp_filename = generate_temp_filename()
+            ext = ".mp4"
+            final_filename = f"{temp_filename}{ext}"
+            final_path = os.path.join(date_dir, final_filename)
+            
+            # 溯源修复：优先使用原始频道的 ID 和 消息 ID
+            target_chat_id = orig_chat_id or update.effective_chat.id
+            target_msg_id = orig_msg_id or update.message.message_id
+            
+            if not orig_chat_id:
+                # 私聊映射
+                if update.effective_chat.type == 'private' or source_type in ["user", "private_user"]:
+                    target_chat_id = context.bot.username or context.bot.id
+
+            success = user_api.run_download_large_file(
+                target_chat_id,
+                target_msg_id,
+                final_path
+            )
+            
+            if success:
+                save_to_db(user, video, final_filename, 
+                            save_dir=date_dir,
+                            media_type='video', 
+                            caption=message.caption,
+                            source=source, 
+                            source_id=source_id, 
+                            source_link=source_link, 
+                            source_type=source_type)
+                update.message.reply_text(f"✅ 大视频保存完成: `{final_filename}`", parse_mode='Markdown')
+                return
+            else:
+                update.message.reply_text("❌ 大视频通过 User API 下载失败")
+                return
+
         video_file = video.get_file()
         
         # 生成临时文件名（不带扩展名）
@@ -680,7 +871,7 @@ def process_video(update: Update, context: CallbackContext) -> None:
             os.rename(temp_path, final_path)
             
             # 保存元数据到数据库
-            save_to_db(user, video, final_filename, media_type='video', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+            save_to_db(user, video, final_filename, save_dir=save_dir, media_type='video', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
             
             logger.info(f"已保存单个视频: {final_path}")
             
@@ -719,7 +910,7 @@ def download_document(update: Update, context: CallbackContext) -> None:
     document = message.document
     
     # 获取转发来源
-    source, source_id, source_link, source_type = get_forward_source_info(message)
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
     
     # 检查是否为图片文件
     mime_type = document.mime_type
@@ -789,7 +980,7 @@ def download_document(update: Update, context: CallbackContext) -> None:
             'file_id': document.file_id,
             'file_unique_id': document.file_unique_id
         })
-        save_to_db(user, photo_obj, final_filename, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+        save_to_db(user, photo_obj, final_filename, save_dir=save_dir, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
         
         logger.info(f"已保存文件: {final_path}")
         
@@ -814,7 +1005,7 @@ def process_animation(update: Update, context: CallbackContext) -> None:
     animation = message.animation
     
     # 获取转发来源
-    source, source_id, source_link, source_type = get_forward_source_info(message)
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
     
     # GIF动画不支持媒体组，所以不需要检查media_group_id
     
@@ -822,6 +1013,48 @@ def process_animation(update: Update, context: CallbackContext) -> None:
     date_dir = get_save_directory(user, source, source_type)
     
     # 获取动画文件
+    file_size = animation.file_size or 0
+    if USER_API_ENABLED and file_size >= 20 * 1024 * 1024:
+        update.message.reply_text(f"⏳ 检测到大动画 ({file_size/1024/1024:.1f}MB)，正在通过 User API 下载...")
+        temp_filename = generate_temp_filename()
+        ext = ".mp4" if animation.mime_type == 'video/mp4' else ".gif"
+        final_filename = f"{temp_filename}{ext}"
+        final_path = os.path.join(date_dir, final_filename)
+        
+        # 溯源修复
+        target_chat_id = orig_chat_id or update.effective_chat.id
+        target_msg_id = orig_msg_id or update.message.message_id
+        
+        if not orig_chat_id:
+            # 私聊映射
+            if update.effective_chat.type == 'private' or source_type in ["user", "private_user"]:
+                target_chat_id = context.bot.username or context.bot.id
+
+        success = user_api.run_download_large_file(
+            target_chat_id,
+            target_msg_id,
+            final_path
+        )
+        
+        if success:
+            animation_obj = type('Animation', (), {
+                'file_id': animation.file_id,
+                'file_unique_id': animation.file_unique_id
+            })
+            save_to_db(user, animation_obj, final_filename, 
+                        save_dir=date_dir,
+                        media_type='animation', 
+                        caption=message.caption,
+                        source=source, 
+                        source_id=source_id, 
+                        source_link=source_link, 
+                        source_type=source_type)
+            update.message.reply_text(f"✅ 大动画保存完成: `{final_filename}`", parse_mode='Markdown')
+            return
+        else:
+            update.message.reply_text("❌ 大动画通过 User API 下载失败")
+            return
+
     animation_file = animation.get_file()
     
     # 检查是否重复
@@ -881,7 +1114,7 @@ def process_animation(update: Update, context: CallbackContext) -> None:
             'file_id': animation.file_id,
             'file_unique_id': animation.file_unique_id
         })
-        save_to_db(user, animation_obj, final_filename, media_type='animation', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+        save_to_db(user, animation_obj, final_filename, save_dir=save_dir, media_type='animation', caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
         
         logger.info(f"已保存GIF动画: {final_path}")
         
@@ -912,78 +1145,71 @@ def get_forward_source_info(message):
         message: Telegram消息对象
         
     Returns:
-        tuple: (source, source_id, source_link, source_type) 来源名称、ID、链接和类型
+        tuple: (source, source_id, source_link, source_type, orig_chat_id, orig_msg_id)
     """
     source = None
     source_id = None
     source_link = None
-    source_type = "unknown"  # 默认来源类型
+    source_type = "unknown"
+    orig_chat_id = None
+    orig_msg_id = None
     
     if message.forward_from_chat:
         # 如果是从频道或群组转发
         chat = message.forward_from_chat
         source = chat.title or f"chat_{chat.id}"
         source_id = str(chat.id)
+        orig_chat_id = chat.id
+        orig_msg_id = getattr(message, 'forward_from_message_id', None)
         
         # 确定来源类型
         if chat.type == "channel":
-            source_type = "channel"  # 频道
+            source_type = "channel"
         elif chat.type == "supergroup" or chat.type == "group":
-            source_type = "group"  # 群组
+            source_type = "group"
         
         # 创建链接
         if chat.username:
-            # 公开频道/群组
             source_link = f"https://t.me/{chat.username}"
         else:
-            # 私有频道/群组
             source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}"
             
     elif message.forward_from:
-        # 如果是从用户转发
+        # 如果是从个人用户转发（用户隐私设置允许的情况下）
         user_from = message.forward_from
+        source_id = str(user_from.id)
+        orig_chat_id = user_from.id
+        # 个人转发通常没有原始消息ID，除非是某些特殊的Bot转发逻辑
+        orig_msg_id = getattr(message, 'forward_from_message_id', None)
         
-        # 检查是否是机器人
         is_bot = getattr(user_from, 'is_bot', False)
-        
         if is_bot:
-            # 如果是机器人，使用显示名称，不再添加"_bot"后缀
-            source_type = "bot"  # 机器人
-            if user_from.first_name:
-                source = user_from.first_name
-            else:
-                source = f"bot_{user_from.id}"
+            source_type = "bot"
+            source = user_from.first_name or f"bot_{user_from.id}"
         else:
-            # 如果是普通用户
-            source_type = "user"  # 用户
+            source_type = "user"
             source = user_from.username or user_from.first_name or f"user_{user_from.id}"
             
-        source_id = str(user_from.id)
-        
-        # 创建用户链接
         if user_from.username:
             source_link = f"https://t.me/{user_from.username}"
     
     elif hasattr(message, 'forward_sender_name') and message.forward_sender_name:
-        # 处理只有名称没有ID的情况（通常是隐私设置或某些机器人）
         source = message.forward_sender_name
         source_id = "unknown"
         source_link = ""
-        source_type = "private_user"  # 隐私用户
+        source_type = "private_user"
     
     elif hasattr(message, 'forward_from_message_id') and message.forward_from_message_id:
-        # 有转发消息ID但没有来源信息的情况
         source = "forwarded_message"
         source_id = str(message.forward_from_message_id)
         source_link = ""
-        source_type = "unknown_forward"  # 未知转发
-    
-    # 文件夹命名安全处理，移除非法字符
+        source_type = "unknown_forward"
+        orig_msg_id = message.forward_from_message_id
+
     if source:
-        # 将不安全的文件夹字符替换为下划线
         source = re.sub(r'[\\/*?:"<>|]', "_", source)
     
-    return source, source_id, source_link, source_type
+    return source, source_id, source_link, source_type, orig_chat_id, orig_msg_id
 
 def main() -> None:
     """启动机器人"""
