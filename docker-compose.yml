@@ -4,9 +4,10 @@ services:
   telegrabber:
     build: .
     container_name: telegrabber
+    network_mode: host
     restart: always
     volumes:
       - ./downloads:/app/downloads
-      - ./.env:/app/.env
+      - ./data:/app/data
     environment:
-      - TZ=Asia/Shanghai 
+      - TZ=Asia/Shanghai

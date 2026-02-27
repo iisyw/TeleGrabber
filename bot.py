@@ -502,9 +502,8 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
             # 如果启用了 User API 且文件较大 (>20MB) 或者 Bot API 明确提示无法下载
             if USER_API_ENABLED and file_size >= 20 * 1024 * 1024:
                 # 使用 User API 下载
-                temp_filename = base_timestamp
                 ext = ".mp4" if media_info.get('media_type') == 'video' else ".jpg"
-                final_filename = f"{temp_filename}_{index}{ext}"
+                final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
                 final_path = os.path.join(save_dir, final_filename)
                 
                 logger.info(f"文件较大 ({file_size/1024/1024:.1f}MB)，切换至 User API 下载: {index}")
@@ -538,14 +537,32 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
                         # User API 看到自己发给机器人的消息是存放在跟机器人的对话中的
                         target_chat_id = context.bot.username or context.bot.id
 
+                # 记录最终下载任务
                 logger.info(f"媒体项 {index} User API 开始任务")
                 u_start = time.time()
                 success = user_api.run_download_large_file(
                     target_chat_id, 
                     target_msg_id, 
                     final_path, 
-                    progress_callback=p_callback
+                    progress_callback=p_callback,
+                    file_unique_id=media_info['file_unique_id']
                 )
+                
+                # 如果初次尝试失败（通常是原频道无法访问），则回退到当前聊天下载
+                if not success and target_chat_id != chat_id:
+                    logger.warning(f"媒体项 {index} 溯源下载失败，尝试从本地聊天回退下载...")
+                    fallback_chat_id = chat_id
+                    chat_type = group_info.get('chat_type')
+                    if chat_type == 'private' or source_type in ["user", "private_user"]:
+                        fallback_chat_id = context.bot.username or context.bot.id
+                    
+                    success = user_api.run_download_large_file(
+                        fallback_chat_id,
+                        media_info['message_id'],
+                        final_path,
+                        progress_callback=p_callback,
+                        file_unique_id=media_info['file_unique_id']
+                    )
                 u_end = time.time()
                 logger.info(f"媒体项 {index} User API 任务结束, 用时: {u_end - u_start:.1f}秒")
                 
@@ -580,8 +597,8 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
             media_type = media_info.get('media_type', 'photo')
             ext = get_video_extension(temp_path) if media_type == 'video' else get_image_extension(temp_path)
             
-            # 最终文件名为 时间戳_序号.后缀
-            final_filename = f"{base_timestamp}_{index}{ext}"
+            # 最终文件名为 媒体组ID_序号_时间戳.后缀 (实现完美垂直聚合)
+            final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
             final_path = os.path.join(save_dir, final_filename)
             os.rename(temp_path, final_path)
             
@@ -692,20 +709,30 @@ def process_photo(update: Update, context: CallbackContext) -> None:
             final_filename = f"{temp_filename}{ext}"
             final_path = os.path.join(date_dir, final_filename)
             
-            # 溯源修复：优先使用原始频道的 ID 和 消息 ID，这能百分百保证内容准确
+            # 溯源修复：优先使用原始频道的 ID 和 消息 ID
             target_chat_id = orig_chat_id or update.effective_chat.id
             target_msg_id = orig_msg_id or update.message.message_id
             
-            if not orig_chat_id:
-                # 如果没有溯源 ID，且是私聊，则映射到机器人在 User API 视角的 Peer
-                if update.effective_chat.type == 'private' or source_type in ["user", "private_user"]:
-                    target_chat_id = context.bot.username or context.bot.id
-
             success = user_api.run_download_large_file(
                 target_chat_id,
                 target_msg_id,
-                final_path
+                final_path,
+                file_unique_id=photo.file_unique_id
             )
+            
+            # 如果初次尝试失败（通常是原频道无法访问），则回退到当前聊天下载
+            if not success and target_chat_id != update.effective_chat.id:
+                logger.warning(f"单张图片溯源下载失败，尝试从本地聊天回退下载...")
+                fallback_chat_id = update.effective_chat.id
+                if update.effective_chat.type == 'private' or source_type in ["user", "private_user"]:
+                    fallback_chat_id = context.bot.username or context.bot.id
+                
+                success = user_api.run_download_large_file(
+                    fallback_chat_id,
+                    update.message.message_id,
+                    final_path,
+                    file_unique_id=photo.file_unique_id
+                )
             
             if success:
                 save_to_db(user, photo, final_filename, 
@@ -834,8 +861,23 @@ def process_video(update: Update, context: CallbackContext) -> None:
             success = user_api.run_download_large_file(
                 target_chat_id,
                 target_msg_id,
-                final_path
+                final_path,
+                file_unique_id=video.file_unique_id
             )
+            
+            # 如果初次尝试失败（通常是原频道无法访问），则回退到当前聊天下载
+            if not success and target_chat_id != update.effective_chat.id:
+                logger.warning(f"单个视频溯源下载失败，尝试从本地聊天回退下载...")
+                fallback_chat_id = update.effective_chat.id
+                if update.effective_chat.type == 'private' or source_type in ["user", "private_user"]:
+                    fallback_chat_id = context.bot.username or context.bot.id
+                
+                success = user_api.run_download_large_file(
+                    fallback_chat_id,
+                    update.message.message_id,
+                    final_path,
+                    file_unique_id=video.file_unique_id
+                )
             
             if success:
                 save_to_db(user, video, final_filename, 
@@ -921,8 +963,8 @@ def download_document(update: Update, context: CallbackContext) -> None:
     # 获取保存目录
     date_dir = get_save_directory(user, source, source_type)
     
-    # 获取文件
-    file = document.get_file()
+    # 获取单文件标识符关键字
+    temp_filename_key = generate_temp_filename()
     
     # 检查是否重复
     dup_info = get_duplicate_info(document.file_unique_id)
@@ -942,13 +984,55 @@ def download_document(update: Update, context: CallbackContext) -> None:
         update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
         return
     
-    # 处理文件名
-    original_name = document.file_name
-    timestamp = int(time.time() * 1000)  # 毫秒级时间戳
-    
-    # 创建临时文件名用于下载
-    temp_filename = f"doc_{timestamp}_temp"
-    temp_path = os.path.join(date_dir, temp_filename)
+    # 检查文件大小，支持大图片文件 (>20MB) 通过 User API 下载
+    file_size = document.file_size or 0
+    if USER_API_ENABLED and file_size >= 20 * 1024 * 1024:
+        update.message.reply_text(f"⏳ 检测到大图片文件 ({file_size/1024/1024:.1f}MB)，正在通过 User API 下载...")
+        temp_filename = generate_temp_filename()
+        # 获取原始扩展名作为备选
+        ext = ".jpg"
+        if document.file_name and '.' in document.file_name:
+            ext = os.path.splitext(document.file_name)[1].lower()
+            
+        final_filename = f"{temp_filename}{ext}"
+        final_path = os.path.join(date_dir, final_filename)
+        
+        # 溯源修复：优先使用原始频道的 ID 和 消息 ID
+        target_chat_id = orig_chat_id or update.effective_chat.id
+        target_msg_id = orig_msg_id or update.message.message_id
+        
+        success = user_api.run_download_large_file(
+            target_chat_id,
+            target_msg_id,
+            final_path,
+            file_unique_id=document.file_unique_id
+        )
+        
+        # 如果初次尝试失败（通常是原频道无法访问），则回退到当前聊天下载
+        if not success and target_chat_id != update.effective_chat.id:
+            logger.warning(f"大图片文件溯源下载失败，尝试从本地聊天回退下载...")
+            fallback_chat_id = update.effective_chat.id
+            if update.effective_chat.type == 'private' or source_type in ["user", "private_user"]:
+                fallback_chat_id = context.bot.username or context.bot.id
+            
+            success = user_api.run_download_large_file(
+                fallback_chat_id,
+                update.message.message_id,
+                final_path,
+                file_unique_id=document.file_unique_id
+            )
+        
+        if success:
+            save_to_db(user, document, final_filename, save_dir=date_dir, caption=message.caption, source=source, source_id=source_id, source_link=source_link, source_type=source_type)
+            update.message.reply_text(f"✅ 大图片文件已保存: `{final_filename}`", parse_mode='Markdown')
+            return
+        else:
+            update.message.reply_text(f"❌ 大图片文件通过 User API 下载失败")
+            return
+
+    # 小文件由 Bot API 处理
+    file = document.get_file()
+    temp_path = os.path.join(date_dir, f"{temp_filename_key}_temp")
     
     try:
         # 下载到临时文件
@@ -968,8 +1052,8 @@ def download_document(update: Update, context: CallbackContext) -> None:
             # 没有原始扩展名，检测实际格式
             ext = get_image_extension(temp_path)
         
-        # 生成最终文件名和路径
-        final_filename = f"doc_{timestamp}{ext}"
+        # 生成最终文件名和路径 (统一使用 single_ 前缀)
+        final_filename = f"{temp_filename_key}{ext}"
         final_path = os.path.join(date_dir, final_filename)
         
         # 重命名为最终文件名
@@ -1033,10 +1117,26 @@ def process_animation(update: Update, context: CallbackContext) -> None:
         success = user_api.run_download_large_file(
             target_chat_id,
             target_msg_id,
-            final_path
+            final_path,
+            file_unique_id=animation.file_unique_id
         )
         
+        # 如果初次尝试失败（通常是原频道无法访问），则回退到当前聊天下载
+        if not success and target_chat_id != update.effective_chat.id:
+            logger.warning(f"动画溯源下载失败，尝试从本地聊天回退下载...")
+            fallback_chat_id = update.effective_chat.id
+            if update.effective_chat.type == 'private' or source_type in ["user", "private_user"]:
+                fallback_chat_id = context.bot.username or context.bot.id
+            
+            success = user_api.run_download_large_file(
+                fallback_chat_id,
+                update.message.message_id,
+                final_path,
+                file_unique_id=animation.file_unique_id
+            )
+        
         if success:
+            # 记录元数据
             animation_obj = type('Animation', (), {
                 'file_id': animation.file_id,
                 'file_unique_id': animation.file_unique_id

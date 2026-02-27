@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from pyrogram import Client
-from config import API_ID, API_HASH, PROXY, logger, SAVE_DIR, DOWNLOAD_RETRIES
+from pyrogram.errors import ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden
+from config import API_ID, API_HASH, PROXY, logger, SAVE_DIR, DOWNLOAD_RETRIES, DATA_DIR
 import os
 import asyncio
 import time
@@ -28,8 +29,16 @@ def _get_proxy_dict():
     try:
         from urllib.parse import urlparse
         parsed = urlparse(PROXY)
+        # Pyrogram 内部使用 PySocks，对于 socks5h 我们映射到 socks5，
+        # 并通过传递 hostname 让其在远程（代理端）进行 DNS 解析。
+        scheme = parsed.scheme
+        if scheme == "socks5h":
+            scheme = "socks5"
+        elif scheme == "socks4a":
+            scheme = "socks4"
+            
         return {
-            "scheme": parsed.scheme,
+            "scheme": scheme,
             "hostname": parsed.hostname,
             "port": parsed.port
         }
@@ -49,7 +58,7 @@ async def _init_client_task():
             api_id=API_ID,
             api_hash=API_HASH,
             proxy=_get_proxy_dict(),
-            workdir=os.getcwd(),
+            workdir=DATA_DIR,
             workers=10,  # 降低工作线程数，提高 MTProto 会话稳定性
             sleep_threshold=60
         )
@@ -96,7 +105,7 @@ async def _reset_client():
     finally:
         _restarting = False
 
-async def _do_download(chat_id, message_id, final_path, progress_callback=None):
+async def _do_download(chat_id, message_id, final_path, progress_callback=None, file_unique_id=None):
     # 使用信号量强制排队，匹配用户观察到的物理串行特性，UI 表现也最整齐
     # 将信号量范围扩大到包含重试过程，确保恢复过程中 Slot 不会被抢占
     async with _semaphore:
@@ -121,13 +130,55 @@ async def _do_download(chat_id, message_id, final_path, progress_callback=None):
                         except Exception as e:
                             logger.warning(f"无法清理旧文件 {p}: {e}")
                 
+                logger.info(f"DEBUG: 正在获取消息 {chat_id}/{message_id}")
                 msg = await client.get_messages(chat_id, message_id)
                 if not msg:
                     logger.error(f"User API 获取消息失败: {chat_id}/{message_id}")
-                    # 获取消息失败直接重试可能也无济于事，但在循环中会继续尝试
                     if attempts < max_attempts: continue
                     return False
+                
+                # 诊断媒体内容
+                media_type = "None"
+                if msg.media:
+                    media_type = msg.media.value
+                logger.info(f"DEBUG: 消息内容 - ID: {msg.id}, Media: {media_type}, From: {msg.chat.id if msg.chat else 'Unknown'}")
+                
+                # --- 智能搜索回退 ---
+                # 在私聊中，Bot API 的 message_id 可能与 MTProto (User API) 的不一致
+                # 如果获取到的消息没有媒体，或者媒体不匹配我们的预期，尝试在最近的 20 条消息中寻找
+                
+                def get_msg_file_unique_id(m):
+                    if not m.media: return None
+                    media_attr = getattr(m, m.media.value) if m.media else None
+                    return getattr(media_attr, 'file_unique_id', None)
+
+                curr_unique_id = get_msg_file_unique_id(msg)
+                
+                if not msg.media or (file_unique_id and curr_unique_id != file_unique_id):
+                    logger.warning(f"DEBUG: 消息 {chat_id}/{message_id} 属性不匹配 (expected_uid: {file_unique_id}, actual: {curr_unique_id})! 尝试在历史记录中进行搜索回退...")
+                    found_msg = None
+                    async for history_msg in client.get_chat_history(chat_id, limit=30):
+                        h_unique_id = get_msg_file_unique_id(history_msg)
+                        if history_msg.media:
+                            if file_unique_id:
+                                # 如果提供了 file_unique_id，则进行精确匹配
+                                if h_unique_id == file_unique_id:
+                                    logger.info(f"DEBUG: 在历史记录中找到了精确匹配的媒体消息 - ID: {history_msg.id}")
+                                    found_msg = history_msg
+                                    break
+                            else:
+                                # 如果没提供，则退而求其次寻找任何可用的媒体（通常是单次任务）
+                                logger.info(f"DEBUG: 在历史记录中找到了潜在的媒体消息 - ID: {history_msg.id}")
+                                found_msg = history_msg
+                                break
                     
+                    if found_msg:
+                        msg = found_msg
+                    else:
+                        logger.warning(f"DEBUG: 在最近历史记录中未找到匹配的媒体，下载失败。")
+                        if attempts < max_attempts: continue
+                        return False
+
                 t_start = time.time()
                 downloaded_path = await client.download_media(
                     msg, 
@@ -184,6 +235,12 @@ async def _do_download(chat_id, message_id, final_path, progress_callback=None):
                 is_mtproto_error = "BadMsgNotification" in err_str or "attribute 'users'" in err_str or "attribute 'bytes'" in err_str
                 
                 if attempts < max_attempts:
+                    # 识别不可重试的永久性错误 (通常是权限、Peer 异常或消息丢失)
+                    if isinstance(e, (ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden)) or \
+                       "CHANNEL_INVALID" in err_str or "CHANNEL_PRIVATE" in err_str or "MSG_ID_INVALID" in err_str:
+                        logger.error(f"User API 遇到不可重试的错误: {e}。这通常意味着当前 User API 账号没有该频道/群组的访问权限，或者消息已被删除。")
+                        return False
+
                     if is_mtproto_error:
                         logger.warning(f"触发 MTProto 同步错误: {e}，正在强制重置客户端并重试...")
                         await _reset_client()
@@ -212,11 +269,11 @@ def start_user_api():
         logger.error(f"User API 预启动失败: {e}")
         return False
 
-def run_download_large_file(chat_id, message_id, final_path, progress_callback=None):
+def run_download_large_file(chat_id, message_id, final_path, progress_callback=None, file_unique_id=None):
     """同步封装器"""
     get_pyrogram_client() 
     future = asyncio.run_coroutine_threadsafe(
-        _do_download(chat_id, message_id, final_path, progress_callback), 
+        _do_download(chat_id, message_id, final_path, progress_callback, file_unique_id), 
         _loop
     )
     try:

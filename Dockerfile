@@ -19,8 +19,12 @@ RUN pip install -i https://mirrors.aliyun.com/pypi/simple/ -U pip \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 应用库文件补丁 (修复 Python 3.12 兼容性问题)
+COPY patch_lib.py .
+RUN python patch_lib.py
+
 # 复制项目文件
 COPY . .
 
 # 直接设置启动命令
-CMD ["python", "main.py"] 
+CMD ["python", "main.py"]

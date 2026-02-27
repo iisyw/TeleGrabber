@@ -17,8 +17,19 @@ logging.getLogger('apscheduler').setLevel(logging.WARNING)
 # 针对 Pyrogram 内部一些会自动记录但我们已经通过重试机制处理的错误，降低其日志级别
 logging.getLogger('pyrogram').setLevel(logging.WARNING)
 
+# 数据和配置目录
+DATA_DIR = 'data'
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+
 # 加载环境变量
-load_dotenv()
+# 优先从 data/.env 加载，如果不存在则回退到根目录 .env (为了兼容性)
+env_path = os.path.join(DATA_DIR, ".env")
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+    logger.info(f"从 {env_path} 加载配置")
+else:
+    load_dotenv()
 
 # Telegram机器人配置
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')

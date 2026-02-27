@@ -13,7 +13,7 @@ import re
 import sqlite3
 import threading
 
-from config import SAVE_DIR
+from config import SAVE_DIR, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -126,17 +126,18 @@ def get_image_extension(file_path):
     return '.jpg'
 
 def generate_temp_filename(media_group_id=None):
-    """生成临时文件名（不带扩展名）用于下载
+    """生成临时文件名关键字（不带扩展名）
     
     Args:
         media_group_id: 可选的媒体组ID
         
     Returns:
-        str: 生成的临时文件名
+        str: 生成的标识符
     """
-    timestamp = int(time.time() * 1000)  # 毫秒级时间戳
-    short_id = get_short_id(media_group_id)
-    return f"{short_id}_{timestamp}"
+    timestamp = int(time.time() * 1000)
+    if media_group_id:
+        return str(timestamp)
+    return f"single_{timestamp}"
 
 def generate_filename(photo_obj, media_group_id=None):
     """根据图片对象生成简洁的唯一文件名
@@ -154,7 +155,7 @@ def generate_filename(photo_obj, media_group_id=None):
     short_id = get_short_id(media_group_id)
     return f"{short_id}_{timestamp}.jpg"
 
-DB_PATH = os.path.join(SAVE_DIR, "telegrabber.db")
+DB_PATH = os.path.join(DATA_DIR, "telegrabber.db")
 
 def init_db():
     """初始化数据库 (含用户信息字段)"""
