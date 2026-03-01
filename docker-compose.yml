@@ -9,5 +9,6 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data
+      - ./static:/app/static
     environment:
       - TZ=Asia/Shanghai

@@ -10,13 +10,14 @@ import sys
 import time
 import logging
 import threading
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler
 import telegram.error
 
-from config import TOKEN, logger, get_connection_args, USER_API_ENABLED
+from config import TOKEN, logger, get_connection_args, USER_API_ENABLED, WEB_PORT
 import bot
 from utils import init_db
 import user_api
+import web_backend
 
 def main() -> None:
     """主程序入口"""
@@ -62,8 +63,17 @@ def main() -> None:
             # 处理文档类型
             dispatcher.add_handler(MessageHandler(Filters.document.image, bot.download_document))
     
+            # 注册回调处理器 (针对媒体组按钮)
+            dispatcher.add_handler(CallbackQueryHandler(bot.handle_callback_query))
+    
             # 启动机器人
             logger.info("启动机器人...")
+            
+            # 同时启动 Web 管理后台
+            logger.info(f"正在启动 Web 管理后台 (http://0.0.0.0:{WEB_PORT})...")
+            web_thread = threading.Thread(target=web_backend.run_server, args=(WEB_PORT,), daemon=True)
+            web_thread.start()
+            
             updater.start_polling()
             logger.info("机器人已启动，正在监听消息...")
             

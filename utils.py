@@ -12,6 +12,7 @@ import mimetypes
 import re
 import sqlite3
 import threading
+import contextlib
 
 from config import SAVE_DIR, DATA_DIR
 
@@ -179,22 +180,47 @@ def init_db():
             source_type TEXT
         )
     ''')
+    cursor.execute('PRAGMA journal_mode=WAL')
     conn.commit()
     conn.close()
 
+# 全局数据库锁，由于 SQLite 在多线程写入时容易锁表，使用此锁确保串口化写入
+_db_lock = threading.Lock()
+
 def get_db_connection():
-    """获取数据库连接"""
-    return sqlite3.connect(DB_PATH)
+    """获取数据库连接 (增加超时机制)"""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    # 启用 WAL 模式提高并发性能
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+    except:
+        pass
+    return conn
+
+@contextlib.contextmanager
+def get_db_cursor():
+    """数据库游标上下文管理器，自动加锁并在结束时释放"""
+    with _db_lock:
+        conn = get_db_connection()
+        try:
+            yield conn.cursor()
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
 
 def get_duplicate_info(file_unique_id):
     """根据 unique_id 查找重复项"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT filename, source, caption, source_link FROM media_metadata WHERE file_unique_id = ?
-    ''', (file_unique_id,))
-    result = cursor.fetchone()
-    conn.close()
+    with _db_lock:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT filename, source, caption, source_link FROM media_metadata WHERE file_unique_id = ?
+        ''', (file_unique_id,))
+        result = cursor.fetchone()
+        conn.close()
     
     if result:
         return {
@@ -208,6 +234,39 @@ def get_duplicate_info(file_unique_id):
 # 全局 CSV 写入锁，防止并发写入导致文件冲突或性能瓶颈
 _csv_lock = threading.Lock()
 
+def delete_csv_records(save_dir, filenames):
+    """从 save_dir 下的 metadata.csv 中删除指定文件名的行"""
+    if not filenames:
+        return
+        
+    csv_path = os.path.join(save_dir, "metadata.csv")
+    if not os.path.exists(csv_path):
+        return
+        
+    try:
+        with _csv_lock:
+            temp_path = csv_path + ".tmp"
+            headers = [
+                'filename', 'datetime', 'file_id', 'file_unique_id', 
+                'media_group_id', 'media_type', 'caption', 'source', 
+                'source_id', 'source_link', 'source_type'
+            ]
+            
+            with open(csv_path, 'r', encoding='utf-8-sig') as fin, \
+                 open(temp_path, 'w', newline='', encoding='utf-8-sig') as fout:
+                reader = csv.DictReader(fin)
+                writer = csv.DictWriter(fout, fieldnames=headers)
+                writer.writeheader()
+                
+                for row in reader:
+                    if row['filename'] not in filenames:
+                        writer.writerow(row)
+            
+            os.replace(temp_path, csv_path)
+            logger.info(f"已更新 CSV 备份: {csv_path} (删除了 {len(filenames)} 条记录)")
+    except Exception as e:
+        logger.error(f"更新 CSV 备份失败: {e}")
+
 def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, media_type='photo', caption=None, source=None, source_id=None, source_link=None, source_type=None):
     """将媒体元数据保存到SQLite数据库，并同步追加到本地 CSV 作为物理备份"""
     # 清洗标题：将换行替换为空格，并将多个空格合并为一个
@@ -218,31 +277,32 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
         caption = ''
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO media_metadata (
-                user_id, user_name, filename, datetime, file_id, file_unique_id, 
-                media_group_id, media_type, caption, source, source_id, 
-                source_link, source_type
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            user.id,
-            user.username or user.first_name,
-            file_name,
-            datetime.now().isoformat(),
-            media_obj.file_id,
-            media_obj.file_unique_id,
-            media_group_id or '',
-            media_type,
-            caption,
-            source or '',
-            source_id or '',
-            source_link or '',
-            source_type or 'unknown'
-        ))
-        conn.commit()
-        conn.close()
+        with _db_lock:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO media_metadata (
+                    user_id, user_name, filename, datetime, file_id, file_unique_id, 
+                    media_group_id, media_type, caption, source, source_id, 
+                    source_link, source_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                user.id,
+                user.username or user.first_name,
+                file_name,
+                datetime.now().isoformat(),
+                media_obj.file_id,
+                media_obj.file_unique_id,
+                media_group_id or '',
+                media_type,
+                caption,
+                source or '',
+                source_id or '',
+                source_link or '',
+                source_type or 'unknown'
+            ))
+            conn.commit()
+            conn.close()
         logger.debug(f"已将{media_type}元数据保存至数据库")
         
         # 同步保存到本地 CSV 作为物理备份 (如果指定了 save_dir)
@@ -288,6 +348,82 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
     except Exception as e:
         logger.error(f"保存元数据到数据库失败: {e}")
         return False
+
+def delete_media_by_id(record_ids):
+    """根据数据库自增 ID 列表删除媒体记录和对应的物理文件"""
+    if not record_ids:
+        return 0
+        
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    deleted_count = 0
+    # 用于按目录批量更新 CSV
+    dir_files_map = {} # {save_dir: [filenames]}
+    
+    try:
+        with _db_lock:
+            # 重新获取连接或使用当前游标
+            for rid in record_ids:
+                # 获取文件名和路径以进行物理删除
+                cursor.execute("SELECT filename, source, source_type, user_id, user_name FROM media_metadata WHERE id = ?", (rid,))
+                row = cursor.fetchone()
+                if row:
+                    filename, source, source_type, user_id, user_name = row
+                    # 构建虚拟用户对象以获取目录
+                    user_stub = type('User', (), {'id': user_id, 'username': user_name, 'first_name': user_name})
+                    save_dir = get_save_directory(user_stub, source, source_type)
+                    file_path = os.path.join(save_dir, filename)
+                    
+                    # 记录待删除的 CSV 映射
+                    if save_dir not in dir_files_map:
+                        dir_files_map[save_dir] = []
+                    dir_files_map[save_dir].append(filename)
+                    
+                    # 1. 物理删除文件
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                            logger.info(f"已物理删除文件: {file_path}")
+                        except Exception as e:
+                            logger.error(f"物理删除文件失败 {file_path}: {e}")
+                    
+                    # 2. 从数据库删除记录
+                    cursor.execute("DELETE FROM media_metadata WHERE id = ?", (rid,))
+                    deleted_count += 1
+                    
+            conn.commit()
+        
+        # 3. 更新 CSV 备份
+        for save_dir, filenames in dir_files_map.items():
+            delete_csv_records(save_dir, filenames)
+            
+    except Exception as e:
+        logger.error(f"按 ID 批量删除媒体记录失败: {e}")
+    finally:
+        try: conn.close()
+        except: pass
+        
+    return deleted_count
+
+def delete_media_records(file_unique_ids):
+    """根据 unique_id 列表删除媒体记录和对应的物理文件 (向下兼容)"""
+    if not file_unique_ids:
+        return 0
+        
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    ids = []
+    try:
+        for fut in file_unique_ids:
+            cursor.execute("SELECT id FROM media_metadata WHERE file_unique_id = ?", (fut,))
+            row = cursor.fetchone()
+            if row:
+                ids.append(row[0])
+    finally:
+        conn.close()
+        
+    return delete_media_by_id(ids)
 
 def get_mime_type(document):
     """获取文档的MIME类型

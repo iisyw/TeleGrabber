@@ -17,8 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 warnings.filterwarnings("ignore", message="python-telegram-bot is using upstream urllib3")
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
 
-from telegram import Update, Message
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
 from telegram.ext import JobQueue
 
 from config import (
@@ -27,7 +27,8 @@ from config import (
 )
 from utils import (
     get_save_directory, generate_temp_filename, get_image_extension, 
-    get_video_extension, save_to_db, get_duplicate_info, DB_PATH
+    get_video_extension, save_to_db, get_duplicate_info, DB_PATH,
+    delete_media_records
 )
 import user_api
 # 媒体组状态文件
@@ -53,9 +54,15 @@ is_processing_media_group = False
 # 在内存中存储当前正在收集的媒体组，减少磁盘 I/O
 # 格式: {collection_key: group_info_dict}
 active_collections = {}
+# 存储已完成处理的媒体组历史，用于支持“重新下载”、“重试失败项目”功能
+# 格式: {collection_key: processed_info_dict}
+processed_groups_history = {}
 # 并发下载执行器 (推荐 10-20 以匹配集群带宽)
 # 下载执行器：限制为 5 个并发，既能保证速度也能避免触发 Telegram 限制或代理过载
 download_executor = ThreadPoolExecutor(max_workers=5)
+# 用于防止同一媒体组内多个相同文件同时保存导致的查重冲突
+saving_unique_ids = set()
+saving_lock = threading.Lock()
 # --- 内存缓存优化结束 ---
 
 def is_user_allowed(update: Update) -> bool:
@@ -251,10 +258,19 @@ def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type
         if is_first_media:
             status_message = None
             if context and message:
+                reply_markup = None
+                text = "⏳ 正在收集媒体组内容，请稍候..."
                 if is_processing_media_group or pending_media_groups:
-                    status_message = message.reply_text("⏳ 媒体组已加入队列，请稍候...")
-                else:
-                    status_message = message.reply_text("⏳ 正在收集媒体组内容，请稍候...")
+                    text = "⏳ 媒体组已加入队列，请稍候..."
+                
+                try:
+                    status_message = message.reply_text(
+                        text, 
+                        reply_to_message_id=message.message_id
+                    )
+                except Exception as e:
+                    logger.warning(f"回复消息失败: {e}")
+                    status_message = message.reply_text(text)
             
             status_message_id = status_message.message_id if status_message else None
             active_collections[collection_key] = {
@@ -382,14 +398,17 @@ def download_with_retry(file_obj, path, retries=3):
             time.sleep(wait)
     return False
 
-def process_media_group_photos(context: CallbackContext, collection_key=None):
+def process_media_group_photos(context: CallbackContext, collection_key=None, is_retry=False, retry_type=None):
     """处理媒体组内容 (并发下载优化版)"""
     if collection_key is None:
         collection_key = context.job.context.get('initial_key')
     
-    # 优先从内存获取
+    # 优先从内存获取或者从历史记录中恢复（针对重试）
     with media_group_lock:
         group_info = active_collections.get(collection_key)
+        if not group_info and is_retry:
+            group_info = processed_groups_history.get(collection_key)
+            
         if not group_info:
             logger.error(f"媒体组收集 {collection_key} 不存在")
             return
@@ -400,7 +419,6 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
     media_items = group_info['media_items']
     status_message_id = group_info.get('status_message_id')
     total_items = len(media_items)
-    
     if total_items == 0:
         if status_message_id:
             try: context.bot.edit_message_text(chat_id=chat_id, message_id=status_message_id, text="❌ 未能处理任何媒体内容")
@@ -410,6 +428,43 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
                 del active_collections[collection_key]
                 save_media_groups_collection()
         return
+
+    # 重要：在开始处理前，清理该媒体组可能残留的内存查重标记
+    with saving_lock:
+        for item in media_items:
+            fid = item.get('file_unique_id')
+            if fid in saving_unique_ids:
+                saving_unique_ids.remove(fid)
+
+    # 重载逻辑处理
+    if is_retry:
+        if retry_type == "all":
+            # 【强制重下全部】：彻底删除该媒体组曾经关联的所有 unique_id 记录和物理文件
+            # 这将包含曾经被跳过的“存量重复项”
+            all_ids = [item['file_unique_id'] for item in media_items]
+            if all_ids:
+                logger.info(f"媒体组 {collection_key} 开始强制重下：正在清理 {len(all_ids)} 条记录...")
+                delete_media_records(all_ids)
+            # 重置所有项状态为 0
+            for item in media_items:
+                item['status'] = 0
+                
+        elif retry_type == "this":
+            # 【重新下载本次】：仅重试本次任务产生的结果
+            # 仅删除 status=1 (本次成功) 的项，不碰 status=2 (存量重复) 的项
+            to_delete = [item['file_unique_id'] for item in media_items if item.get('status') == 1]
+            if to_delete:
+                logger.info(f"媒体组 {collection_key} 重新下载本次：正在清理 {len(to_delete)} 条新记录...")
+                delete_media_records(to_delete)
+            # 重置所有项状态（已跳过的依然会被跳过，因为数据库中记录还在）
+            for item in media_items:
+                item['status'] = 0
+                
+        elif retry_type == "failed":
+            # 【重试失败项】
+            for item in media_items:
+                if item.get('status') == 3:
+                    item['status'] = 0
 
     # 更新状态为开始处理
     if status_message_id:
@@ -431,14 +486,26 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
     skipped_duplicates = []
     
     # 状态：0-等待中(⏳), 1-成功(✅), 2-重复(♻️), 3-失败(❌), 4-下载中(⬇️)
-    items_status = [0] * total_items
+    # 初始化 items_status，优先从 media_items 中读取已有状态（针对重试）
+    items_status = []
+    for item in media_items:
+        items_status.append(item.get('status', 0))
+    
     item_progress = [0] * total_items # 记录每个项的下载进度(0-99)
     
     # 预生成基础文件名（时间戳）
-    base_timestamp = generate_temp_filename(media_group_id)
+    # 如果是重试，应保持原有时间戳 consistent
+    base_timestamp = group_info.get('base_timestamp')
+    if not base_timestamp:
+        base_timestamp = generate_temp_filename(media_group_id)
+        group_info['base_timestamp'] = base_timestamp
     
     # 记录上次 UI 更新时间
     last_ui_update = {"time": 0} 
+    is_finished = False # 标志位，防止最终完成的消息被异步更新覆盖回“正在保存”
+
+    # 统计已完成的项（用于重试时同步进度）
+    processed_count = sum(1 for s in items_status if s in [1, 2])
 
     def get_progress_bar():
         status_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌", 4: "⬇️"}
@@ -452,16 +519,31 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
 
     def update_ui_async():
         """非阻塞地更新机器人状态消息"""
+        if is_finished: return
+        
         curr_time = time.time()
         # 控制更新频率，至少间隔 1.2 秒 (Bot API 有频率限制，不能太快)
         if curr_time - last_ui_update["time"] > 1.2:
             last_ui_update["time"] = curr_time
             def _do_update():
                 try:
+                    button_list = [
+                        [
+                            InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
+                            InlineKeyboardButton("🔥 强制重下全部", callback_data=f"mg_retry_all:{collection_key}")
+                        ],
+                        [
+                            InlineKeyboardButton("🔄 刷新状态", callback_data=f"mg_refresh:{collection_key}"),
+                            InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")
+                        ]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(button_list)
+                    
                     context.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=status_message_id,
-                        text=f"正在保存媒体组...\n进度: {get_progress_bar()} ({processed_count}/{total_items})"
+                        text=f"正在保存媒体组...\n进度: {get_progress_bar()} ({processed_count}/{total_items})",
+                        reply_markup=reply_markup
                     )
                 except: pass
             # 开启新线程更新，绝对不阻塞 User API 的事件循环
@@ -470,32 +552,47 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
     def download_and_save_task(index, media_info):
         nonlocal processed_count
         try:
+            # 如果该项已经成功或重复，直接跳过（针对重试）
+            if items_status[index-1] in [1, 2]:
+                return True
+
             file_unique_id = media_info['file_unique_id']
             
-            # 下载前检查查重
+            # 1. 检查物理查重（数据库）
             dup_info = get_duplicate_info(file_unique_id)
-            if dup_info:
+            
+            # 2. 检查内存查重（正在下载中的同组项）
+            is_internally_saving = False
+            with saving_lock:
+                if file_unique_id in saving_unique_ids:
+                    is_internally_saving = True
+                else:
+                    saving_unique_ids.add(file_unique_id)
+
+            if dup_info or is_internally_saving:
+                # 如果是内部正在保存，尝试等待一会获取其路径（简单处理则直接标记重复）
                 with progress_lock:
+                    # 如果没有外部重复信息，说明是本组内部重复，显示简化信息
+                    fname = dup_info['filename'] if dup_info else "当前组内重复项"
+                    src = dup_info['source'] if dup_info else "本消息"
                     skipped_duplicates.append({
                         'index': index,
-                        'filename': dup_info['filename'],
-                        'source': dup_info['source'],
-                        'source_link': dup_info.get('source_link')
+                        'filename': fname,
+                        'source': src,
+                        'source_link': dup_info.get('source_link') if dup_info else "",
+                        'caption': (dup_info.get('caption') if dup_info else '无') or '无'
                     })
                     items_status[index-1] = 2 # 标记为重复
+                    media_info['status'] = 2
                     processed_count += 1
-                    current_count = processed_count
-                
-                # 更新进度条
-                if status_message_id and current_count % 2 == 0: 
-                    try:
-                        context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=status_message_id,
-                            text=f"正在保存媒体组...\n进度: {get_progress_bar()} ({current_count}/{total_items})"
-                        )
-                    except: pass
+                update_ui_async()
                 return True
+        except Exception as e:
+            logger.error(f"查重逻辑检查出错: {e}")
+            # 继续尝试下载，不直接返回
+            pass
+
+        try:
 
             file_size = media_info.get('file_size', 0)
             
@@ -538,7 +635,7 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
                         target_chat_id = context.bot.username or context.bot.id
 
                 # 记录最终下载任务
-                logger.info(f"媒体项 {index} User API 开始任务")
+                logger.debug(f"媒体项 {index} User API 开始任务")
                 u_start = time.time()
                 success = user_api.run_download_large_file(
                     target_chat_id, 
@@ -564,7 +661,7 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
                         file_unique_id=media_info['file_unique_id']
                     )
                 u_end = time.time()
-                logger.info(f"媒体项 {index} User API 任务结束, 用时: {u_end - u_start:.1f}秒")
+                logger.debug(f"媒体项 {index} User API 任务结束, 用时: {u_end - u_start:.1f}秒")
                 
                 if success:
                     # 保存元数据 (User API 下载完后也要存库)
@@ -581,6 +678,7 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
                     
                     with progress_lock:
                         items_status[index-1] = 1
+                        media_info['status'] = 1
                         processed_count += 1
                     update_ui_async()
                     return True
@@ -604,7 +702,7 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
             
             # 保存元数据
             media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': media_info['file_unique_id']})
-            save_to_db(user_obj, media_obj_stub, final_filename, 
+            db_success = save_to_db(user_obj, media_obj_stub, final_filename, 
                         save_dir=save_dir,
                         media_group_id=media_group_id, 
                         media_type=media_type, 
@@ -614,8 +712,12 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
                         source_link=group_info.get('source_link'), 
                         source_type=source_type)
             
+            if not db_success:
+                raise Exception("元数据保存数据库失败 (可能数据库被锁定)")
+
             with progress_lock:
                 items_status[index-1] = 1 # 标记为成功
+                media_info['status'] = 1
                 processed_count += 1
             update_ui_async()
             return True
@@ -623,41 +725,81 @@ def process_media_group_photos(context: CallbackContext, collection_key=None):
             logger.error(f"媒体项 {index} 下载失败: {e}")
             with progress_lock:
                 items_status[index-1] = 3 # 标记为失败
+                media_info['status'] = 3
                 processed_count += 1
+            update_ui_async()
             return False
+        finally:
+            # 清理保存中标记
+            with saving_lock:
+                # 只有当初次进入时是由本线程添加的标记，才由本线程负责清理
+                if not is_internally_saving and file_unique_id in saving_unique_ids:
+                    saving_unique_ids.remove(file_unique_id)
     futures = [download_executor.submit(download_and_save_task, i, item) for i, item in enumerate(media_items, 1)]
     results = [f.result() for f in futures]
     
     elapsed_time = time.time() - start_time
+    is_finished = True # 停止异步进度更新
     success_count = sum(1 for r in results if r)
     actual_downloaded = success_count - len(skipped_duplicates)
     
     if status_message_id:
         try:
-            finish_text = f"✅ 媒体组保存完成！({success_count}/{total_items}个项，用时{elapsed_time:.1f}秒)\n"
+            has_failed = any(s == 3 for s in items_status)
+            success_count = sum(1 for s in items_status if s == 1)
+            dup_count = sum(1 for s in items_status if s == 2)
+            total_success = success_count + dup_count
+            
+            finish_text = f"✅ 媒体组保存完成！({total_success}/{total_items}个项，用时{elapsed_time:.1f}秒)\n"
             finish_text += f"结果: {get_progress_bar()}\n"
+            
             if skipped_duplicates:
-                # 按照媒体在组中的原始顺序排序
                 skipped_duplicates.sort(key=lambda x: x['index'])
                 finish_text += f"♻️ 跳过了 {len(skipped_duplicates)} 个重复资源:\n"
-                for dup in skipped_duplicates: # 移除5条限制，列出全部
+                for dup in skipped_duplicates:
                     source_display = dup['source']
                     if dup.get('source_link'):
                         source_display = f"[{dup['source']}]({dup['source_link']})"
-                    finish_text += f" - 第{dup['index']}项 -> `{dup['filename']}` (来源: {source_display})\n"
+                    finish_text += f" - 第{dup['index']}项 -> `{dup['filename']}` (来源: {source_display}，原标题: {dup['caption']})\n"
             
+            if has_failed:
+                finish_text += f"\n⚠️ 有部分项下载失败，您可以点击下方按钮重试。"
+
+            # 最终布局按钮
+            keyboard = []
+            keyboard.append([
+                InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
+                InlineKeyboardButton("🔥 强制重下全部", callback_data=f"mg_retry_all:{collection_key}")
+            ])
+            
+            row2 = [InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")]
+            if has_failed:
+                row2.insert(0, InlineKeyboardButton("❌ 重试失败项", callback_data=f"mg_retry_failed:{collection_key}"))
+            keyboard.append(row2)
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
             context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_message_id,
                 text=finish_text,
                 parse_mode='Markdown',
-                disable_web_page_preview=True
+                disable_web_page_preview=True,
+                reply_markup=reply_markup
             )
-        except: pass
+        except Exception as e: 
+            logger.error(f"更新最终状态消息失败: {e}")
     
-    # 清理内存中的收集状态并同步到磁盘
+    # 清理内存中的收集状态并移动到历史记录
     with media_group_lock:
         if collection_key in active_collections:
+            # 存入历史记录，供按钮操作使用
+            processed_groups_history[collection_key] = active_collections[collection_key]
+            # 限制历史记录大小，防止内存溢出 (保留最近 100 个)
+            if len(processed_groups_history) > 100:
+                oldest_key = next(iter(processed_groups_history))
+                del processed_groups_history[oldest_key]
+                
             del active_collections[collection_key]
             save_media_groups_collection()
 
@@ -691,13 +833,15 @@ def process_photo(update: Update, context: CallbackContext) -> None:
                 source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
                 
             reply_msg = (
-                f"♻️ **检测到重复资源 (单张图片)**\n\n"
-                f"文件已存在: `{dup_info['filename']}`\n"
-                f"最初来源: {source_display}\n"
                 f"最初描述: {dup_info['caption'] or '无'}\n"
                 f"当前描述: {current_caption}"
             )
-            update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
+            update.message.reply_text(
+                reply_msg, 
+                parse_mode='Markdown', 
+                disable_web_page_preview=True,
+                reply_to_message_id=update.message.message_id
+            )
             return
 
         # 检查文件大小 (照片通常不会超过20MB，但为了统一逻辑加上)
@@ -773,7 +917,10 @@ def process_photo(update: Update, context: CallbackContext) -> None:
             logger.info(f"已保存单张图片: {final_path}")
             
             # 发送确认消息
-            update.message.reply_text(f"✅ 图片已保存")
+            update.message.reply_text(
+                f"✅ 图片已保存",
+                reply_to_message_id=update.message.message_id
+            )
         except Exception as e:
             # 清理临时文件
             if os.path.exists(temp_path):
@@ -829,13 +976,15 @@ def process_video(update: Update, context: CallbackContext) -> None:
                 source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
 
             reply_msg = (
-                f"♻️ **检测到重复资源 (单个视频)**\n\n"
-                f"文件已存在: `{dup_info['filename']}`\n"
-                f"最初来源: {source_display}\n"
                 f"最初描述: {dup_info['caption'] or '无'}\n"
                 f"当前描述: {current_caption}"
             )
-            update.message.reply_text(reply_msg, parse_mode='Markdown', disable_web_page_preview=True)
+            update.message.reply_text(
+                reply_msg, 
+                parse_mode='Markdown', 
+                disable_web_page_preview=True,
+                reply_to_message_id=update.message.message_id
+            )
             return
 
         # 检查文件大小
@@ -1231,6 +1380,188 @@ def process_animation(update: Update, context: CallbackContext) -> None:
         logger.error(f"下载GIF失败: {str(e)}")
         update.message.reply_text(f"❌ GIF动画保存失败: {str(e)}")
 
+def handle_callback_query(update: Update, context: CallbackContext) -> None:
+    """处理按钮点击回调"""
+    query = update.callback_query
+    data = query.data
+    
+    # 记录点击事件
+    logger.info(f"收到回调查询: {data} (用户: {update.effective_user.id})")
+    
+    try:
+        if data.startswith("mg_"):
+            # 媒体组相关操作
+            parts = data.split(":", 1)
+            action = parts[0]
+            collection_key = parts[1]
+            
+            logger.info(f"媒体组动作: {action}, 键: {collection_key}")
+            
+            if action == "mg_retry_this":
+                query.answer("正在安全重新下载本次项目...")
+                threading.Thread(
+                    target=process_media_group_photos, 
+                    args=(context, collection_key, True, "this"), 
+                    daemon=True
+                ).start()
+                
+            elif action == "mg_retry_all":
+                query.answer("⚠️ 正在强制重新下载全部项目（含存量）...")
+                threading.Thread(
+                    target=process_media_group_photos, 
+                    args=(context, collection_key, True, "all"), 
+                    daemon=True
+                ).start()
+                
+            elif action == "mg_retry_failed":
+                query.answer("正在重试失败项目...")
+                threading.Thread(
+                    target=process_media_group_photos, 
+                    args=(context, collection_key, True, "failed"), 
+                    daemon=True
+                ).start()
+                
+            elif action == "mg_refresh":
+                query.answer("正在刷新状态...")
+                # 直接通过 edit_message 同步最新 UI
+                # 注意：这里需要从 active_collections 中手动重新生成文本
+                with media_group_lock:
+                    group_info = active_collections.get(collection_key) or processed_groups_history.get(collection_key)
+                    if group_info:
+                        media_items = group_info['media_items']
+                        items_status = [item.get('status', 0) for item in media_items]
+                        processed_count = sum(1 for s in items_status if s in [1, 2, 3])
+                        total_count = len(media_items)
+                        
+                        icons = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌"}
+                        progress_bar = "".join([icons.get(s, "❓") for s in items_status])
+                        
+                        status_text = "正在保存媒体组..."
+                        if processed_count >= total_count:
+                            status_text = "保存完成 (已手动刷新)"
+                            
+                        new_text = (
+                            f"**{status_text}**\n"
+                            f"进度: {progress_bar} ({processed_count}/{total_count})"
+                        )
+                        
+                        # 保持按钮
+                        button_list = []
+                        if processed_count < total_count:
+                            button_list.append([
+                                InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
+                                InlineKeyboardButton("🔥 强制重下全部", callback_data=f"mg_retry_all:{collection_key}")
+                            ])
+                            button_list.append([
+                                InlineKeyboardButton("🔄 刷新状态", callback_data=f"mg_refresh:{collection_key}"),
+                                InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")
+                            ])
+                        else:
+                            # 已完成布局
+                            button_list.append([
+                                InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
+                                InlineKeyboardButton("🔥 强制重下全部", callback_data=f"mg_retry_all:{collection_key}")
+                            ])
+                            
+                            row_last = [InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")]
+                            if any(s == 3 for s in items_status):
+                                row_last.insert(0, InlineKeyboardButton("❌ 重试失败项", callback_data=f"mg_retry_failed:{collection_key}"))
+                            button_list.append(row_last)
+                            
+                        try:
+                            query.edit_message_text(new_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(button_list))
+                        except Exception as e:
+                            # 忽略 "Message is not modified" 错误
+                            if "Message is not modified" not in str(e):
+                                logger.error(f"刷新 UI 报错: {e}")
+                            query.answer("当前已是最新状态")
+                    else:
+                        query.answer("⚠️ 找不到该记录，无法刷新", show_alert=True)
+                
+            elif action == "mg_delete":
+                query.answer("正在删除本地内容...")
+                with media_group_lock:
+                    # 同时检查内存和历史，因为用户点击时状态可能刚变
+                    group_info = processed_groups_history.get(collection_key) or active_collections.get(collection_key)
+                    if group_info:
+                        media_items = group_info.get('media_items', [])
+                        # 修复：仅删除本次下载成功的记录 (status=1)，不删除重复项 (status=2)
+                        # 因为状态 2 代表该项目本来就在库中，删除它会导致逻辑错误
+                        file_unique_ids = [item['file_unique_id'] for item in media_items if item.get('status') == 1]
+                        
+                        deleted_count = 0
+                        deleted_count = 0
+                        if file_unique_ids:
+                            deleted_count = delete_media_records(file_unique_ids)
+                        
+                        # 额外处理：清理内存中的保存标记，防止僵死
+                        all_ids = [item['file_unique_id'] for item in media_items]
+                        with saving_lock:
+                            for fid in all_ids:
+                                if fid in saving_unique_ids:
+                                    saving_unique_ids.remove(fid)
+                        
+                        # 额外处理：如果有些文件还在下载中或没入库，通过预测文件名尝试物理删除
+                        base_timestamp = group_info.get('base_timestamp')
+                        media_group_id = group_info.get('media_group_id')
+                        # 构建虚拟用户对象以获取目录
+                        user_stub = type('User', (), {
+                            'id': group_info.get('user_id'), 
+                            'username': group_info.get('user_name'), 
+                            'first_name': group_info.get('user_name')
+                        })
+                        save_dir = get_save_directory(user_stub, group_info.get('source'), group_info.get('source_type'))
+                        
+                        extra_deleted = 0
+                        if base_timestamp and media_group_id:
+                            for i, item in enumerate(media_items, 1):
+                                # 尝试删除可能存在的临时文件或已生成但未入库的文件
+                                ext = ".mp4" if item.get('media_type') == 'video' else ".jpg"
+                                # 之前可能的预测路径
+                                possible_names = [
+                                    f"{media_group_id}_{i}_{base_timestamp}{ext}",
+                                    f"{base_timestamp}_temp_{i}"
+                                ]
+                                for fname in possible_names:
+                                    fpath = os.path.join(save_dir, fname)
+                                    if os.path.exists(fpath):
+                                        try:
+                                            os.remove(fpath)
+                                            extra_deleted += 1
+                                        except: pass
+
+                        # 构造重试按钮
+                        retry_keyboard = InlineKeyboardMarkup([
+                            [
+                                InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
+                                InlineKeyboardButton("🔥 强制重下全部", callback_data=f"mg_retry_all:{collection_key}")
+                            ]
+                        ])
+
+                        if deleted_count > 0 or extra_deleted > 0:
+                            query.edit_message_text(
+                                f"🗑️ 已从本地磁盘和数据库中删除了 {deleted_count + extra_deleted} 个相关文件/记录。",
+                                reply_markup=retry_keyboard
+                            )
+                        else:
+                            query.edit_message_text(
+                                "ℹ️ 本次下载没有产生任何有效文件或记录。",
+                                reply_markup=retry_keyboard
+                            )
+                        
+                        # 注意：此处不再从缓存中移除，以便用户点击“重新下载”时能找到元数据
+                        # processed_groups_history.pop(collection_key, None)
+                        # active_collections.pop(collection_key, None)
+                    else:
+                        logger.warning(f"删除失败：未找到媒体组信息 {collection_key}")
+                        query.edit_message_text("⚠️ 错误：找不到该下载记录，可能已被清理或重启。")
+        else:
+            query.answer("未知操作")
+    except Exception as e:
+        logger.error(f"处理回调查询出错: {e}")
+        try: query.answer("处理请求时出错", show_alert=True)
+        except: pass
+
 def handle_url_with_image(update: Update, context: CallbackContext) -> None:
     """处理包含图片的URL链接"""
     # 此功能需要额外的库来解析网页和下载图片，这里仅提供提示
@@ -1339,6 +1670,9 @@ def main() -> None:
         # 设置命令处理器
         dispatcher.add_handler(CommandHandler("start", start))
         dispatcher.add_handler(CommandHandler("help", help_command))
+        
+        # 回调处理器 (放在媒体处理器之前)
+        dispatcher.add_handler(CallbackQueryHandler(handle_callback_query))
         
         # 设置媒体处理器
         dispatcher.add_handler(MessageHandler(Filters.photo, process_photo))

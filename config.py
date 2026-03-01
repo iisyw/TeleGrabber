@@ -37,6 +37,7 @@ SAVE_DIR = os.getenv('SAVE_DIR', 'downloads')
 PROXY = os.getenv('PROXY_URL')  # 可选的代理设置
 TIMEOUT = int(os.getenv('CONNECTION_TIMEOUT', '30'))  # 连接超时设置，默认30秒
 DOWNLOAD_RETRIES = int(os.getenv('DOWNLOAD_RETRIES', '3'))  # 下载失败重试次数，默认3次
+WEB_PORT = int(os.getenv('WEB_PORT', '5000'))  # Web 管理后台端口，默认 5000
 
 # 允许使用机器人的用户列表
 # 格式为逗号分隔的用户名或用户ID列表，例如: user1,user2,123456789

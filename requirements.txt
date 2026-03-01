@@ -6,3 +6,6 @@ pysocks==1.7.1
 pyrogram>=2.0.0
 PyroTgCrypto
 hachoir
+fastapi
+uvicorn
+jinja2

@@ -155,28 +155,32 @@ async def _do_download(chat_id, message_id, final_path, progress_callback=None, 
                 curr_unique_id = get_msg_file_unique_id(msg)
                 
                 if not msg.media or (file_unique_id and curr_unique_id != file_unique_id):
-                    logger.warning(f"DEBUG: 消息 {chat_id}/{message_id} 属性不匹配 (expected_uid: {file_unique_id}, actual: {curr_unique_id})! 尝试在历史记录中进行搜索回退...")
+                    if msg.media:
+                        logger.info(f"DEBUG: 消息 {chat_id}/{message_id} 属性不匹配 (预期: {file_unique_id}, 实际: {curr_unique_id})。转入搜索模式...")
+                    else:
+                        logger.info(f"DEBUG: 消息 {chat_id}/{message_id} 无媒体内容。转入搜索模式...")
+                        
                     found_msg = None
-                    async for history_msg in client.get_chat_history(chat_id, limit=30):
+                    async for history_msg in client.get_chat_history(chat_id, limit=150):
                         h_unique_id = get_msg_file_unique_id(history_msg)
                         if history_msg.media:
                             if file_unique_id:
-                                # 如果提供了 file_unique_id，则进行精确匹配
                                 if h_unique_id == file_unique_id:
-                                    logger.info(f"DEBUG: 在历史记录中找到了精确匹配的媒体消息 - ID: {history_msg.id}")
+                                    logger.info(f"DEBUG: 在历史记录中找到了匹配项 - ID: {history_msg.id}")
                                     found_msg = history_msg
                                     break
                             else:
-                                # 如果没提供，则退而求其次寻找任何可用的媒体（通常是单次任务）
-                                logger.info(f"DEBUG: 在历史记录中找到了潜在的媒体消息 - ID: {history_msg.id}")
+                                logger.info(f"DEBUG: 在历史记录中找到了潜在媒体 - ID: {history_msg.id}")
                                 found_msg = history_msg
                                 break
                     
                     if found_msg:
                         msg = found_msg
+                        # 重要：更新 message_id，使得如果下载报错重试时使用正确的 ID
+                        message_id = found_msg.id
                     else:
-                        logger.warning(f"DEBUG: 在最近历史记录中未找到匹配的媒体，下载失败。")
-                        if attempts < max_attempts: continue
+                        logger.info(f"DEBUG: 在最近历史记录中未找到匹配的媒体。")
+                        # 如果搜索也无果，且 ID 不对，直接返回失败以便外层进入回退下载逻辑，不再浪费重试
                         return False
 
                 t_start = time.time()

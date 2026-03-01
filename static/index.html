@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TeleGrabber | 媒体管理终端</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="glass-container">
+        <header>
+            <div class="logo">
+                <span class="icon">🛰️</span>
+                <h1>TeleGrabber <span>Dashboard</span></h1>
+            </div>
+            <div class="search-bar">
+                <input type="text" id="searchInput" placeholder="搜索关键词或文件名...">
+                <button id="searchBtn">🔍</button>
+            </div>
+        </header>
+
+        <nav class="filters">
+            <div class="filter-group">
+                <label>来源渠道:</label>
+                <select id="sourceFilter">
+                    <option value="">全部来源</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>媒体组:</label>
+                <select id="groupFilter">
+                    <option value="">全部展示</option>
+                    <option value="single">仅单张内容</option>
+                </select>
+            </div>
+            <div class="stats">
+                <span id="totalCount">加载中...</span>
+            </div>
+        </nav>
+
+        <main class="gallery-container" id="mediaContainer">
+            <!-- 媒体组分组将在这里动态加载 -->
+            <div class="loader-container">
+                <div class="loader"></div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 预览模态框 -->
+    <div id="modal" class="modal">
+        <span class="close-modal">&times;</span>
+        <div class="modal-content">
+            <div id="modalMedia"></div>
+            <div class="modal-info">
+                <h3 id="modalCaption"></h3>
+                <p id="modalMeta"></p>
+                <div class="modal-actions">
+                    <button id="modalDeleteBtn" class="danger-btn">🗑️ 彻底删除</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
