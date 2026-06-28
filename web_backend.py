@@ -181,15 +181,40 @@ def get_sources():
         raise HTTPException(status_code=500, detail="获取来源列表失败")
 
 @app.get("/api/stats")
-def get_stats():
-    """获取媒体统计信息"""
+def get_stats(
+    search: Optional[str] = None,
+    source: Optional[str] = None,
+    media_group_id: Optional[str] = None,
+):
+    """获取媒体统计信息。支持与 /api/media 相同的筛选参数，
+    用于前端显示"当前筛选条件下的数量"。"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM media_metadata")
+
+        query = "SELECT COUNT(*) FROM media_metadata"
+        params = []
+        conditions = []
+        if search:
+            conditions.append("(caption LIKE ? OR filename LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if media_group_id:
+            if media_group_id == "single":
+                conditions.append("(media_group_id IS NULL OR media_group_id = '' OR media_group_id = 'single')")
+            else:
+                conditions.append("media_group_id = ?")
+                params.append(media_group_id)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        cursor.execute(query, params)
         count = cursor.fetchone()[0]
         conn.close()
-        return {"total_count": count}
+        # filtered 表示是否带了筛选条件，供前端区分文案
+        return {"total_count": count, "filtered": bool(conditions)}
     except Exception as e:
         logger.error(f"获取统计信息失败: {e}")
         raise HTTPException(status_code=500, detail="获取统计信息失败")

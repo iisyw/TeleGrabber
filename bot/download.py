@@ -9,12 +9,15 @@ import os
 import time
 import asyncio
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from config import logger, USER_API_ENABLED
 from utils import (
     get_save_directory, generate_temp_filename, get_image_extension,
-    get_video_extension, save_to_db, get_duplicate_info,
+    get_video_extension, save_to_db, get_duplicate_info, delete_media_records,
 )
 import user_api
+from bot import state
 
 # 大文件阈值：超过此大小走 User API (MTProto)，因为 Bot API 限制 20MB
 LARGE_FILE_THRESHOLD = 20 * 1024 * 1024
@@ -28,8 +31,51 @@ MEDIA_LABELS = {
 }
 
 
+def _single_buttons(single_key, is_dup, has_failed):
+    """构造单条消息的操作按钮。
+
+    - 重复(is_dup): 只给 🔥 强制重下 (覆盖库中已存在记录)
+    - 成功/失败:    ♻️ 重新下载 + 🗑️ 删除本次内容
+    """
+    if is_dup:
+        rows = [[InlineKeyboardButton("🔥 强制重下", callback_data=f"sg_force:{single_key}")]]
+    else:
+        rows = [[
+            InlineKeyboardButton("♻️ 重新下载", callback_data=f"sg_redownload:{single_key}"),
+            InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"sg_delete:{single_key}"),
+        ]]
+    return InlineKeyboardMarkup(rows)
+
+
+def build_single_record(media_obj, media_type, date_dir, source_info, ext_for_large,
+                        chat, message, final_filename=None):
+    """构造一条可脱离原始 update 复用的单张下载记录。"""
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = source_info
+    return {
+        'file_id': media_obj.file_id,
+        'file_unique_id': media_obj.file_unique_id,
+        'media_type': media_type,
+        'date_dir': date_dir,
+        'ext_for_large': ext_for_large,
+        'final_filename': final_filename,
+        'caption': message.caption,
+        'file_size': getattr(media_obj, 'file_size', 0) or 0,
+        'source': source,
+        'source_id': source_id,
+        'source_link': source_link,
+        'source_type': source_type,
+        'orig_chat_id': orig_chat_id,
+        'orig_msg_id': orig_msg_id,
+        'chat_id': chat.id,
+        'chat_type': chat.type,
+        'message_id': message.message_id,
+        'user_id': message.from_user.id if message.from_user else None,
+        'user_name': (message.from_user.username or message.from_user.first_name) if message.from_user else None,
+    }
+
+
 async def reply_duplicate(update, media_obj, media_type, caption):
-    """检测重复资源，若重复则回复完整提示并返回 True。"""
+    """检测重复资源，若重复则回复完整提示（带强制重下按钮）并返回 True。"""
     dup_info = get_duplicate_info(media_obj.file_unique_id)
     if not dup_info:
         return False
@@ -46,13 +92,7 @@ async def reply_duplicate(update, media_obj, media_type, caption):
         f"最初描述: {dup_info.get('caption') or '无'}\n"
         f"当前描述: {caption or '无'}"
     )
-    await update.message.reply_text(
-        reply_msg,
-        parse_mode='Markdown',
-        disable_web_page_preview=True,
-        reply_to_message_id=update.message.message_id,
-    )
-    return True
+    return reply_msg
 
 
 def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix):
@@ -91,6 +131,116 @@ def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix):
             pass
 
     return callback
+
+
+def _stub_user(record):
+    """从 record 重建一个供 save_to_db 使用的轻量 user 对象。"""
+    return type('User', (), {
+        'id': record.get('user_id'),
+        'username': record.get('user_name'),
+        'first_name': record.get('user_name'),
+    })
+
+
+async def download_large_from_record(bot, record, status_chat_id, status_message_id):
+    """基于 record 通过 User API 下载大文件（用于按钮重下，脱离原始 update）。
+
+    返回最终文件名或 None。
+    """
+    media_type = record['media_type']
+    date_dir = record['date_dir']
+    label = MEDIA_LABELS.get(media_type, '文件')
+    loop = asyncio.get_running_loop()
+
+    temp_filename = generate_temp_filename()
+    final_filename = f"{temp_filename}{record['ext_for_large']}"
+    final_path = os.path.join(date_dir, final_filename)
+
+    progress = _make_progress_callback(
+        bot, loop, status_chat_id, status_message_id,
+        prefix=f"⏳ 正在通过 User API 下载大{label}...",
+    )
+
+    orig_chat_id = record.get('orig_chat_id')
+    orig_msg_id = record.get('orig_msg_id')
+    chat_id = record['chat_id']
+    chat_type = record.get('chat_type')
+    source_type = record.get('source_type')
+
+    target_chat_id = orig_chat_id or chat_id
+    target_msg_id = orig_msg_id or record['message_id']
+    if not orig_chat_id and (chat_type == 'private' or source_type in ["user", "private_user"]):
+        target_chat_id = bot.username or bot.id
+
+    file_unique_id = record['file_unique_id']
+    success = await loop.run_in_executor(
+        None,
+        lambda: user_api.run_download_large_file(
+            target_chat_id, target_msg_id, final_path,
+            progress_callback=progress, file_unique_id=file_unique_id,
+        ),
+    )
+    if not success and target_chat_id != chat_id:
+        logger.warning(f"大{label}溯源重下失败，尝试从本地聊天回退下载...")
+        fallback_chat_id = chat_id
+        if chat_type == 'private' or source_type in ["user", "private_user"]:
+            fallback_chat_id = bot.username or bot.id
+        success = await loop.run_in_executor(
+            None,
+            lambda: user_api.run_download_large_file(
+                fallback_chat_id, record['message_id'], final_path,
+                progress_callback=progress, file_unique_id=file_unique_id,
+            ),
+        )
+    if not success:
+        return None
+
+    media_obj_stub = type('Media', (), {'file_id': record['file_id'], 'file_unique_id': file_unique_id})
+    save_to_db(
+        _stub_user(record), media_obj_stub, final_filename,
+        save_dir=date_dir, media_type=media_type, caption=record.get('caption'),
+        source=record.get('source'), source_id=record.get('source_id'),
+        source_link=record.get('source_link'), source_type=source_type,
+    )
+    record['final_filename'] = final_filename
+    return final_filename
+
+
+async def download_small_from_record(bot, record):
+    """基于 record 通过 Bot API 重新下载小文件。返回最终文件名或 None。"""
+    media_type = record['media_type']
+    date_dir = record['date_dir']
+    temp_filename = generate_temp_filename()
+    temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
+    try:
+        tg_file = await bot.get_file(record['file_id'])
+        await tg_file.download_to_drive(temp_path)
+
+        if media_type == 'video':
+            ext = get_video_extension(temp_path)
+        else:
+            ext = get_image_extension(temp_path)
+        final_filename = f"{temp_filename}{ext}"
+        final_path = os.path.join(date_dir, final_filename)
+        os.rename(temp_path, final_path)
+
+        media_obj_stub = type('Media', (), {'file_id': record['file_id'], 'file_unique_id': record['file_unique_id']})
+        save_to_db(
+            _stub_user(record), media_obj_stub, final_filename,
+            save_dir=date_dir, media_type=media_type, caption=record.get('caption'),
+            source=record.get('source'), source_id=record.get('source_id'),
+            source_link=record.get('source_link'), source_type=record.get('source_type'),
+        )
+        record['final_filename'] = final_filename
+        return final_filename
+    except Exception as e:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        logger.error(f"{MEDIA_LABELS.get(media_type, '文件')}重新下载失败: {e}")
+        return None
 
 
 async def download_large_via_user_api(update, context, media_obj, media_type, date_dir,

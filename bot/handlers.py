@@ -5,9 +5,11 @@
 """
 
 import os
+import uuid
 
 from config import logger, USER_API_ENABLED
-from utils import get_image_extension, get_video_extension, get_save_directory
+from utils import get_image_extension, get_video_extension, get_save_directory, get_library_stats
+from bot import state
 from bot.helpers import restricted, get_forward_source_info
 from bot.media_group import (
     add_photo_to_collection, add_video_to_collection,
@@ -16,6 +18,7 @@ from bot.media_group import (
 from bot.download import (
     LARGE_FILE_THRESHOLD, MEDIA_LABELS,
     reply_duplicate, download_large_via_user_api, save_small_file,
+    build_single_record, _single_buttons,
 )
 
 
@@ -57,9 +60,38 @@ async def help_command(update, context) -> None:
         f"• 所有媒体元数据会保存到 SQLite 数据库中并记录用户信息\n"
         f"• 自动检测重复资源并跳过，节省磁盘空间\n"
         f"• 大文件下载时会显示实时进度\n"
+        f"• 发送 /stats 查看媒体库统计\n"
         f"• 支持断网重连和代理设置\n"
     )
     await update.message.reply_text(help_message)
+
+
+@restricted
+async def stats_command(update, context) -> None:
+    """/stats：显示媒体库统计概况。"""
+    try:
+        s = get_library_stats()
+    except Exception as e:
+        logger.error(f"获取统计失败: {e}")
+        await update.message.reply_text("❌ 获取统计信息失败")
+        return
+
+    type_labels = {'photo': '图片', 'video': '视频', 'animation': '动画', 'document': '文档'}
+    type_lines = "\n".join(
+        f"  • {type_labels.get(t, t)}: {c}" for t, c in sorted(s['by_type'].items(), key=lambda x: -x[1])
+    ) or "  • 暂无"
+    source_lines = "\n".join(
+        f"  {i+1}. {src} ({cnt})" for i, (src, cnt) in enumerate(s['top_sources'])
+    ) or "  暂无"
+
+    msg = (
+        f"📊 **媒体库统计**\n\n"
+        f"总数: {s['total']}\n"
+        f"今日新增: {s['today']}\n\n"
+        f"📁 按类型:\n{type_lines}\n\n"
+        f"🔝 来源 Top5:\n{source_lines}"
+    )
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 
 @restricted
@@ -79,7 +111,7 @@ async def _reply(update, text):
     return await update.message.reply_text(text, reply_to_message_id=update.message.message_id)
 
 
-async def _edit_or_reply(context, update, status_message, text):
+async def _edit_or_reply(context, update, status_message, text, reply_markup=None):
     """优先编辑已有状态消息；编辑失败则退化为新回复。"""
     if status_message:
         try:
@@ -87,23 +119,41 @@ async def _edit_or_reply(context, update, status_message, text):
                 chat_id=update.effective_chat.id,
                 message_id=status_message.message_id,
                 text=text,
+                reply_markup=reply_markup,
             )
             return
         except Exception:
             pass
-    await _reply(update, text)
+    await update.message.reply_text(
+        text, reply_to_message_id=update.message.message_id, reply_markup=reply_markup,
+    )
 
 
 async def _handle_single_media(update, context, media_obj, media_type, ext_for_large, detect_ext):
-    """处理单条媒体（非媒体组）的通用流程：去重 -> 大文件 / 小文件。"""
+    """处理单条媒体（非媒体组）的通用流程：去重 -> 大文件 / 小文件。
+
+    完成后附带操作按钮，并登记 single_record 供按钮回调使用。
+    """
     message = update.message
     source_info = get_forward_source_info(message)
     source_type = source_info[3]
     date_dir = get_save_directory(update.effective_user, source_info[0], source_type)
     label = MEDIA_LABELS.get(media_type, '文件')
+    chat = update.effective_chat
 
-    # 1. 去重检查（统一完整提示）
-    if await reply_duplicate(update, media_obj, media_type, message.caption):
+    single_key = uuid.uuid4().hex[:12]
+
+    # 1. 去重检查：重复则给"强制重下"按钮（覆盖库中已有记录）
+    dup_text = await reply_duplicate(update, media_obj, media_type, message.caption)
+    if dup_text:
+        record = build_single_record(media_obj, media_type, date_dir, source_info, ext_for_large, chat, message)
+        record['is_dup'] = True
+        state.put_single_record(single_key, record)
+        await update.message.reply_text(
+            dup_text, parse_mode='Markdown', disable_web_page_preview=True,
+            reply_to_message_id=message.message_id,
+            reply_markup=_single_buttons(single_key, is_dup=True, has_failed=False),
+        )
         return
 
     file_size = getattr(media_obj, 'file_size', 0) or 0
@@ -115,19 +165,25 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
             update, context, media_obj, media_type, date_dir,
             ext_for_large, source_info, status_message,
         )
-        if final_filename:
-            await _edit_or_reply(context, update, status_message, f"✅ 大{label}已保存: {final_filename}")
-        else:
-            await _edit_or_reply(context, update, status_message, f"❌ 大{label}通过 User API 下载失败")
-        return
-
-    # 3. 小文件走 Bot API（先发处理中提示，完成后编辑为结果）
-    status_message = await _reply(update, f"⏳ 正在保存{label}...")
-    final_filename = await save_small_file(update, media_obj, media_type, date_dir, source_info, detect_ext)
-    if final_filename:
-        await _edit_or_reply(context, update, status_message, f"✅ {label}已保存")
     else:
-        await _edit_or_reply(context, update, status_message, f"❌ {label}保存失败")
+        # 3. 小文件走 Bot API
+        status_message = await _reply(update, f"⏳ 正在保存{label}...")
+        final_filename = await save_small_file(update, media_obj, media_type, date_dir, source_info, detect_ext)
+
+    # 登记记录并附带按钮
+    record = build_single_record(media_obj, media_type, date_dir, source_info, ext_for_large,
+                                 chat, message, final_filename=final_filename)
+    record['is_dup'] = False
+    state.put_single_record(single_key, record)
+
+    if final_filename:
+        result_text = f"✅ {label}已保存"
+    else:
+        result_text = f"❌ {label}保存失败"
+    await _edit_or_reply(
+        context, update, status_message, result_text,
+        reply_markup=_single_buttons(single_key, is_dup=False, has_failed=not final_filename),
+    )
 
 
 @restricted

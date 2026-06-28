@@ -41,3 +41,31 @@ download_executor = ThreadPoolExecutor(max_workers=5)
 # 用于防止同一媒体组内多个相同文件同时保存导致的查重冲突
 saving_unique_ids = set()
 saving_lock = threading.Lock()
+
+# --- 单条消息下载记录 ---
+# 支持单张消息的"重新下载/强制重下/删除"按钮回调。
+# 格式: {single_key: record_dict}，record 含 file_id/file_unique_id/media_type/
+#       date_dir/final_filename/caption/source.../chat_id/message_id/file_size/is_dup
+single_records = {}
+single_lock = threading.Lock()
+# 历史上限，防止内存无限增长（保留最近 N 条）
+SINGLE_RECORDS_LIMIT = 200
+
+
+def put_single_record(key, record):
+    """登记一条单张下载记录，超出上限时淘汰最旧的。"""
+    with single_lock:
+        single_records[key] = record
+        while len(single_records) > SINGLE_RECORDS_LIMIT:
+            oldest = next(iter(single_records))
+            del single_records[oldest]
+
+
+def get_single_record(key):
+    with single_lock:
+        return single_records.get(key)
+
+
+def drop_single_record(key):
+    with single_lock:
+        single_records.pop(key, None)

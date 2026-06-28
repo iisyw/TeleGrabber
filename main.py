@@ -22,6 +22,10 @@ def build_application():
     """根据配置构造 python-telegram-bot v21 的 Application。"""
     builder = ApplicationBuilder().token(TOKEN)
 
+    # 并发处理 update：否则一个耗时 handler（如大文件下载）会阻塞所有后续消息/回调。
+    # PTB v21 默认串行处理，必须显式开启。
+    builder = builder.concurrent_updates(True)
+
     conn = get_connection_args()
     if 'connect_timeout' in conn:
         builder = builder.connect_timeout(conn['connect_timeout'])
@@ -35,6 +39,7 @@ def build_application():
     # 命令处理器
     app.add_handler(CommandHandler("start", bot.start))
     app.add_handler(CommandHandler("help", bot.help_command))
+    app.add_handler(CommandHandler("stats", bot.stats_command))
 
     # 媒体处理器
     app.add_handler(MessageHandler(filters.PHOTO, bot.process_photo))
@@ -47,6 +52,9 @@ def build_application():
 
     # 回调处理器 (媒体组按钮)
     app.add_handler(CallbackQueryHandler(bot.handle_callback_query))
+
+    # 全局错误处理器
+    app.add_error_handler(bot.error_handler)
 
     return app
 

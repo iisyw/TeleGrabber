@@ -3,6 +3,7 @@
 from .handlers import (
     start,
     help_command,
+    stats_command,
     process_photo,
     process_video,
     download_document,
@@ -11,10 +12,12 @@ from .handlers import (
 )
 from .callbacks import handle_callback_query
 from .media_group import load_media_groups_collection
+from .errors import error_handler
 
 __all__ = [
     "start",
     "help_command",
+    "stats_command",
     "process_photo",
     "process_video",
     "download_document",
@@ -22,4 +25,5 @@ __all__ = [
     "handle_unsupported",
     "handle_callback_query",
     "load_media_groups_collection",
+    "error_handler",
 ]

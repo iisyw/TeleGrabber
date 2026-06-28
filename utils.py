@@ -214,6 +214,35 @@ def get_duplicate_info(file_unique_id):
         }
     return None
 
+
+def get_library_stats():
+    """统计媒体库概况：总数、今日新增、按来源 Top、按类型分布。"""
+    stats = {'total': 0, 'today': 0, 'by_type': {}, 'top_sources': []}
+    with _db_lock:
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM media_metadata")
+            stats['total'] = cur.fetchone()[0]
+
+            # 今日新增（datetime 以 ISO 字符串存储，按日期前缀匹配）
+            today = datetime.now().strftime("%Y-%m-%d")
+            cur.execute("SELECT COUNT(*) FROM media_metadata WHERE datetime LIKE ?", (f"{today}%",))
+            stats['today'] = cur.fetchone()[0]
+
+            cur.execute("SELECT media_type, COUNT(*) FROM media_metadata GROUP BY media_type")
+            stats['by_type'] = {row[0] or 'unknown': row[1] for row in cur.fetchall()}
+
+            cur.execute(
+                "SELECT source, COUNT(*) AS c FROM media_metadata "
+                "WHERE source IS NOT NULL AND source != '' "
+                "GROUP BY source ORDER BY c DESC LIMIT 5"
+            )
+            stats['top_sources'] = [(row[0], row[1]) for row in cur.fetchall()]
+        finally:
+            conn.close()
+    return stats
+
 # 全局 CSV 写入锁，防止并发写入导致文件冲突或性能瓶颈
 _csv_lock = threading.Lock()
 

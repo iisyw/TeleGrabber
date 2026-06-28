@@ -124,10 +124,9 @@ document.body.appendChild(backToTopBtn);
 
 // 初始化
 async function init() {
-    await loadStats();
     await loadSources();
     await loadGroups();
-    resetAndLoad();
+    resetAndLoad();   // 内部已调用 loadStats
     setupEventListeners();
 }
 
@@ -136,16 +135,26 @@ function resetAndLoad() {
     isLastPage = false;
     mediaList = [];
     mediaContainer.innerHTML = '';
+    loadStats();       // 同步刷新当前筛选条件下的数量
     loadMoreMedia();
 }
 
-// 加载统计信息
+// 加载统计信息（跟随当前搜索/筛选条件）
 async function loadStats() {
+    let url = '/api/stats';
+    const qs = [];
+    if (currentSearch) qs.push(`search=${encodeURIComponent(currentSearch)}`);
+    if (currentSource) qs.push(`source=${encodeURIComponent(currentSource)}`);
+    if (currentGroup) qs.push(`media_group_id=${encodeURIComponent(currentGroup)}`);
+    if (qs.length) url += '?' + qs.join('&');
+
     try {
-        const response = await fetch('/api/stats');
+        const response = await fetch(url);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        totalCountEl.textContent = `总量: ${data.total_count}`;
+        totalCountEl.textContent = data.filtered
+            ? `找到: ${data.total_count}`
+            : `总量: ${data.total_count}`;
     } catch (err) {
         console.error('加载统计失败:', err);
         totalCountEl.textContent = '总量: --';

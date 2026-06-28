@@ -105,12 +105,13 @@ async def add_video_to_collection(media_group_id, chat_id, user, video, context=
 async def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None,
                                   source=None, source_id=None, source_link=None, source_type=None,
                                   chat_type=None, orig_chat_id=None, orig_msg_id=None):
-    """将媒体（照片或视频）添加到媒体组收集中 (优化版：优先操作内存)"""
-    collection_key = f"{chat_id}_{media_group_id}"
+    """将媒体（照片或视频）添加到媒体组收集中 (优化版：优先操作内存)。
 
-    # 先判断是否首条（持锁读），首条需要发送状态消息（await，不能在锁内）
-    with state.media_group_lock:
-        is_first_media = collection_key not in state.active_collections
+    并发安全：开启 concurrent_updates 后，同一媒体组的多张图会并发进入本函数。
+    必须在锁内原子地"占座建组"——只有第一个能建组并成为首条，其余只追加；
+    否则会出现每张图都判定自己是首条、各发一条"正在收集"消息的竞态。
+    """
+    collection_key = f"{chat_id}_{media_group_id}"
 
     media_info = {
         'file_id': media_obj.file_id,
@@ -122,20 +123,11 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
         'orig_msg_id': orig_msg_id
     }
 
-    status_message_id = None
-    if is_first_media and context and message:
-        text = "⏳ 正在收集媒体组内容，请稍候..."
-        if state.is_processing_media_group or state.pending_media_groups:
-            text = "⏳ 媒体组已加入队列，请稍候..."
-        try:
-            status_message = await message.reply_text(text, reply_to_message_id=message.message_id)
-            status_message_id = status_message.message_id
-        except Exception as e:
-            logger.warning(f"回复消息失败: {e}")
-
+    # 锁内原子操作：判定首条 + 占座建组 / 追加
     with state.media_group_lock:
-        # 二次确认（首条期间可能有并发），仍按首条建组
-        if collection_key not in state.active_collections:
+        is_first_media = collection_key not in state.active_collections
+        if is_first_media:
+            # 立刻占座（status_message_id 先留空，发完消息再回填）
             state.active_collections[collection_key] = {
                 'chat_id': chat_id,
                 'user_id': user.id,
@@ -143,7 +135,7 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
                 'media_group_id': media_group_id,
                 'media_items': [media_info],
                 'first_time': datetime.now().isoformat(),
-                'status_message_id': status_message_id,
+                'status_message_id': None,
                 'source': source,
                 'source_id': source_id,
                 'source_link': source_link,
@@ -151,15 +143,27 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
                 'chat_type': chat_type or (message.chat.type if message else None),
                 'caption': message.caption if message else None
             }
-            logger.info(f"开始收集媒体组 {media_group_id}，消息ID: {status_message_id}")
-            save_media_groups_collection()
+            need_queue_hint = state.is_processing_media_group or bool(state.pending_media_groups)
         else:
             state.active_collections[collection_key]['media_items'].append(media_info)
             if not state.active_collections[collection_key].get('caption') and message and message.caption:
                 state.active_collections[collection_key]['caption'] = message.caption
-            logger.debug(f"媒体组 {media_group_id} 添加了{media_type}，总数: {len(state.active_collections[collection_key]['media_items'])}")
-
+            logger.debug(f"媒体组 {media_group_id} 追加{media_type}，总数: {len(state.active_collections[collection_key]['media_items'])}")
         count = len(state.active_collections[collection_key]['media_items'])
+
+    # 仅首条发送状态消息（await 放在锁外），发完回填 message_id
+    if is_first_media and context and message:
+        text = "⏳ 媒体组已加入队列，请稍候..." if need_queue_hint else "⏳ 正在收集媒体组内容，请稍候..."
+        try:
+            status_message = await message.reply_text(text, reply_to_message_id=message.message_id)
+            with state.media_group_lock:
+                grp = state.active_collections.get(collection_key)
+                if grp is not None:
+                    grp['status_message_id'] = status_message.message_id
+            logger.info(f"开始收集媒体组 {media_group_id}，消息ID: {status_message.message_id}")
+            save_media_groups_collection()
+        except Exception as e:
+            logger.warning(f"回复消息失败: {e}")
 
     return count, is_first_media
 
@@ -323,13 +327,18 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
     processed_count = {"value": sum(1 for s in items_status if s in [1, 2])}
 
     def get_progress_bar():
-        status_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌", 4: "⬇️"}
+        # 小文件 (Bot API) 与大文件 (User API) 用两套 emoji，全程一眼区分；
+        # 是否大文件由 file_size 决定，收集阶段已知，无需等下载。
+        small_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌"}
+        large_map = {0: "🕓", 1: "🟢", 2: "♻️", 3: "🔴"}  # 重复(2)两者共用 ♻️
         res = []
         for i, s in enumerate(items_status):
-            if s == 4:
-                res.append(f"⬇️{item_progress[i]}%")
+            is_large = (media_items[i].get('file_size', 0) or 0) >= 20 * 1024 * 1024
+            if s == 4:  # 下载中
+                res.append(f"{'☁️' if is_large else '🔽'}{item_progress[i]}%")
             else:
-                res.append(status_map.get(s, "❓"))
+                table = large_map if is_large else small_map
+                res.append(table.get(s, "❓"))
         return "".join(res)
 
     def update_ui_async():
