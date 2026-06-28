@@ -8,7 +8,6 @@ Pyrogram (User API) 仍跑在自己的事件循环线程里，通过同步封装
 import os
 import time
 import asyncio
-import threading
 
 from config import logger, USER_API_ENABLED
 from utils import (

@@ -52,7 +52,14 @@ def restricted(func):
 
 
 def get_forward_source_info(message):
-    """获取转发来源的详细信息
+    """获取转发来源的详细信息 (适配 Bot API 7.0 / PTB v21 的 forward_origin)。
+
+    Bot API 7.0 将旧的 forward_from / forward_from_chat / forward_sender_name
+    等字段统一为 message.forward_origin，类型为以下之一：
+      - MessageOriginChannel    (.chat, .message_id)
+      - MessageOriginChat       (.sender_chat)
+      - MessageOriginUser       (.sender_user)
+      - MessageOriginHiddenUser (.sender_user_name)
 
     Returns:
         tuple: (source, source_id, source_link, source_type, orig_chat_id, orig_msg_id)
@@ -66,31 +73,39 @@ def get_forward_source_info(message):
     orig_chat_id = None
     orig_msg_id = None
 
-    if message.forward_from_chat:
-        # 如果是从频道或群组转发
-        chat = message.forward_from_chat
+    origin = getattr(message, 'forward_origin', None)
+    origin_type = getattr(origin, 'type', None) if origin else None
+
+    if origin_type == "channel":
+        # 频道：origin.chat 是频道，origin.message_id 是原消息 ID
+        chat = origin.chat
         source = chat.title or f"chat_{chat.id}"
         source_id = str(chat.id)
+        source_type = "channel"
         orig_chat_id = chat.id
-        orig_msg_id = getattr(message, 'forward_from_message_id', None)
-
-        if chat.type == "channel":
-            source_type = "channel"
-        elif chat.type == "supergroup" or chat.type == "group":
-            source_type = "group"
-
+        orig_msg_id = getattr(origin, 'message_id', None)
         if chat.username:
             source_link = f"https://t.me/{chat.username}"
         else:
             source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}"
 
-    elif message.forward_from:
-        # 如果是从个人用户转发（用户隐私设置允许的情况下）
-        user_from = message.forward_from
+    elif origin_type == "chat":
+        # 群组代发：origin.sender_chat
+        chat = origin.sender_chat
+        source = chat.title or f"chat_{chat.id}"
+        source_id = str(chat.id)
+        source_type = "group"
+        orig_chat_id = chat.id
+        if chat.username:
+            source_link = f"https://t.me/{chat.username}"
+        else:
+            source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}"
+
+    elif origin_type == "user":
+        # 已知用户
+        user_from = origin.sender_user
         source_id = str(user_from.id)
         orig_chat_id = user_from.id
-        orig_msg_id = getattr(message, 'forward_from_message_id', None)
-
         is_bot = getattr(user_from, 'is_bot', False)
         if is_bot:
             source_type = "bot"
@@ -98,22 +113,15 @@ def get_forward_source_info(message):
         else:
             source_type = "user"
             source = user_from.username or user_from.first_name or f"user_{user_from.id}"
-
         if user_from.username:
             source_link = f"https://t.me/{user_from.username}"
 
-    elif hasattr(message, 'forward_sender_name') and message.forward_sender_name:
-        source = message.forward_sender_name
+    elif origin_type == "hidden_user":
+        # 隐藏用户：只有名字
+        source = getattr(origin, 'sender_user_name', None) or "hidden_user"
         source_id = "unknown"
         source_link = ""
         source_type = "private_user"
-
-    elif hasattr(message, 'forward_from_message_id') and message.forward_from_message_id:
-        source = "forwarded_message"
-        source_id = str(message.forward_from_message_id)
-        source_link = ""
-        source_type = "unknown_forward"
-        orig_msg_id = message.forward_from_message_id
 
     if source:
         source = re.sub(r'[\\/*?:"<>|]', "_", source)

@@ -458,7 +458,9 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                 await tg_file.download_to_drive(temp_path)
 
             fut = asyncio.run_coroutine_threadsafe(_bot_download(), loop)
-            fut.result()  # 阻塞当前下载线程直到完成
+            # 设超时兜底：正常不会触发，仅防极端情况下主循环异常导致本线程永久挂起；
+            # 超时会抛 TimeoutError，被下方 except 捕获，该项标记为失败，不拖垮整组。
+            fut.result(timeout=300)
 
             ext = get_video_extension(temp_path) if media_type == 'video' else get_image_extension(temp_path)
             final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
