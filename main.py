@@ -40,12 +40,15 @@ def build_application():
     app.add_handler(CommandHandler("start", bot.start))
     app.add_handler(CommandHandler("help", bot.help_command))
     app.add_handler(CommandHandler("stats", bot.stats_command))
+    app.add_handler(CommandHandler("link", bot.link_command))
 
     # 媒体处理器
     app.add_handler(MessageHandler(filters.PHOTO, bot.process_photo))
     app.add_handler(MessageHandler(filters.VIDEO, bot.process_video))
     app.add_handler(MessageHandler(filters.ANIMATION, bot.process_animation))
     app.add_handler(MessageHandler(filters.Document.IMAGE, bot.download_document))
+    # 以"文件"方式发送的源文件视频不会命中 filters.VIDEO，单独接收
+    app.add_handler(MessageHandler(filters.Document.VIDEO, bot.download_document_video))
 
     # 兜底：其他消息提示不支持
     app.add_handler(MessageHandler(filters.ALL, bot.handle_unsupported))

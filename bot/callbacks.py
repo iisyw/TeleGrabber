@@ -9,7 +9,7 @@ from utils import get_save_directory, delete_media_records, get_duplicate_info
 from bot import state
 from bot.media_group import process_media_group
 from bot.download import (
-    MEDIA_LABELS, _single_buttons,
+    MEDIA_LABELS, _single_buttons, build_progress_bar, _stub_user,
     download_large_from_record, download_small_from_record,
 )
 
@@ -133,9 +133,9 @@ async def _single_redownload(query, context, record, single_key, force):
     except Exception:
         pass
 
-    is_large = record.get('file_size', 0) >= 20 * 1024 * 1024
-    if is_large:
-        # 大文件进度回调也更新这条原消息
+    use_user_api = record.get('download_method') == 'user_api' or record.get('file_size', 0) >= 20 * 1024 * 1024
+    if use_user_api:
+        # User API 进度回调也更新这条原消息；/link 来源即使是小文件也走这里。
         final_filename = await download_large_from_record(bot, record, chat_id, message_id)
     else:
         final_filename = await download_small_from_record(bot, record)
@@ -169,14 +169,8 @@ async def _handle_refresh(query, collection_key):
     processed_count = sum(1 for s in items_status if s in [1, 2, 3])
     total_count = len(items_status)
 
-    # 与 media_group.get_progress_bar 保持一致：小文件/大文件两套 emoji
-    small_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌"}
-    large_map = {0: "🕓", 1: "🟢", 2: "♻️", 3: "🔴"}
-    bar = []
-    for i, s in enumerate(items_status):
-        is_large = (media_items[i].get('file_size', 0) or 0) >= 20 * 1024 * 1024
-        bar.append((large_map if is_large else small_map).get(s, "❓"))
-    progress_bar = "".join(bar)
+    # refresh 无法获取下载线程内部的实时百分比，下载中项以 0% 占位（仅影响显示，不影响状态）
+    progress_bar = build_progress_bar(media_items, items_status, [0] * total_count)
     status_text = "保存完成 (已手动刷新)" if processed_count >= total_count else "正在保存媒体组..."
     new_text = f"**{status_text}**\n进度: {progress_bar} ({processed_count}/{total_count})"
 
@@ -191,8 +185,9 @@ async def _handle_refresh(query, collection_key):
         ])
     else:
         row_last = [InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")]
-        if any(s == 3 for s in items_status):
-            row_last.insert(0, InlineKeyboardButton("❌ 重试失败项", callback_data=f"mg_retry_failed:{collection_key}"))
+        failed_count = sum(1 for s in items_status if s == 3)
+        if failed_count:
+            row_last.insert(0, InlineKeyboardButton(f"❌ 重试失败项({failed_count})", callback_data=f"mg_retry_failed:{collection_key}"))
         button_list.append(row_last)
 
     try:
@@ -228,10 +223,9 @@ async def _handle_delete(query, collection_key):
         # 通过预测文件名尝试物理删除未入库文件
         base_timestamp = group_info.get('base_timestamp')
         media_group_id = group_info.get('media_group_id')
-        user_stub = type('User', (), {
-            'id': group_info.get('user_id'),
-            'username': group_info.get('user_name'),
-            'first_name': group_info.get('user_name')
+        user_stub = _stub_user({
+            'user_id': group_info.get('user_id'),
+            'user_name': group_info.get('user_name'),
         })
         save_dir = get_save_directory(user_stub, group_info.get('source'), group_info.get('source_type'))
 

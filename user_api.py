@@ -1,13 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from pyrogram import Client
+from pyrogram import Client, utils
 from pyrogram.errors import ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden
 from config import API_ID, API_HASH, PROXY, logger, SAVE_DIR, DOWNLOAD_RETRIES, DATA_DIR
 import os
 import asyncio
 import time
 import threading
+import mimetypes
+import re
+from urllib.parse import urlparse
 
 # --- 全局状态 ---
 _app = None
@@ -104,6 +107,197 @@ async def _reset_client():
             logger.info("User API 客户端已完成重置并重新连接")
     finally:
         _restarting = False
+
+def _normalize_chat_ref(chat_ref):
+    chat_ref = str(chat_ref).strip()
+    if not chat_ref:
+        return None
+    if chat_ref.startswith('@'):
+        return chat_ref[1:]
+    try:
+        chat_id = int(chat_ref)
+        if chat_id > 0:
+            return utils.get_channel_id(chat_id)
+        return chat_id
+    except ValueError:
+        return chat_ref
+
+
+def parse_message_link(link):
+    """解析 Telegram 消息链接，返回 (chat_id, message_id)。"""
+    try:
+        parsed = urlparse(link.strip())
+        host = (parsed.netloc or '').lower()
+        if host.startswith('www.'):
+            host = host[4:]
+        if host not in ('t.me', 'telegram.me', 'telegram.dog'):
+            return None
+
+        parts = [part for part in parsed.path.split('/') if part]
+        if len(parts) == 2 and parts[0] != 'c':
+            return parts[0], int(parts[1])
+        if len(parts) == 3 and parts[0] == 'c':
+            return utils.get_channel_id(int(parts[1])), int(parts[2])
+        if len(parts) == 3 and parts[0] != 'c':
+            return parts[0], int(parts[2])
+        if len(parts) == 4 and parts[0] == 'c':
+            return utils.get_channel_id(int(parts[1])), int(parts[3])
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def parse_message_ref(args):
+    """解析 /link 参数，支持完整链接或 chat_id/username + message_id。"""
+    if not args:
+        return None
+    if len(args) == 1:
+        return parse_message_link(args[0])
+    try:
+        chat_id = _normalize_chat_ref(args[0])
+        message_id = int(args[1])
+        if chat_id is None or message_id <= 0:
+            return None
+        return chat_id, message_id
+    except (TypeError, ValueError):
+        return None
+
+
+def _enum_value(value, default='unknown'):
+    if value is None:
+        return default
+    raw = getattr(value, 'value', value)
+    return str(raw).lower()
+
+
+def _is_media_document(document):
+    """判断 document 是否为视频/图片源文件（用于决定是否优先选它）。"""
+    if document is None:
+        return False
+    doc_mime = getattr(document, 'mime_type', '') or ''
+    doc_name = getattr(document, 'file_name', '') or ''
+    doc_ext = os.path.splitext(doc_name)[1].lower()
+    return (
+        doc_mime.startswith('video/') or doc_mime.startswith('image/')
+        or doc_ext in ('.mp4', '.mkv', '.mov', '.avi', '.webm', '.m4v',
+                       '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.heic')
+    )
+
+
+def _message_media_info(message):
+    if not message or not message.media:
+        return None
+    media_type = message.media.value
+    media_obj = getattr(message, media_type, None)
+    if not media_obj:
+        return None
+
+    # 同一条消息可能同时带压缩版 (video) 和原始源文件 (document)。
+    # 仅当 document 本身是视频/图片源文件时才优先选它（无损、体积大），
+    # 否则维持原媒体类型，避免把音频/压缩包等非媒体 document 误当成媒体下载。
+    is_source_file = False
+    document = getattr(message, 'document', None)
+    if media_type != 'document' and _is_media_document(document):
+        media_obj = document
+        media_type = 'document'
+        is_source_file = True
+
+    file_name = getattr(media_obj, 'file_name', None) or ''
+    ext = os.path.splitext(file_name)[1].lower() if file_name else ''
+    mime_type = getattr(media_obj, 'mime_type', None)
+    if not ext and mime_type:
+        ext = mimetypes.guess_extension(mime_type) or ''
+    if not ext:
+        defaults = {
+            'photo': '.jpg',
+            'video': '.mp4',
+            'animation': '.gif',
+            'document': '.bin',
+            'audio': '.mp3',
+            'voice': '.ogg',
+            'video_note': '.mp4',
+            'sticker': '.webp',
+        }
+        # document 源文件优先按 mime 猜，再退回到通用默认
+        if media_type == 'document' and mime_type and mime_type.startswith('video/'):
+            ext = '.mp4'
+        else:
+            ext = defaults.get(media_type, '.bin')
+
+    chat = message.chat
+    source = getattr(chat, 'title', None) or getattr(chat, 'username', None) or getattr(chat, 'first_name', None) or str(getattr(chat, 'id', 'unknown'))
+    source = re.sub(r'[\\/*?:"<>|]', "_", source)
+    source_link = getattr(message, 'link', None)
+    if not source_link and getattr(chat, 'username', None):
+        source_link = f"https://t.me/{chat.username}/{message.id}"
+
+    # 若 document 实际是视频源文件，归类为 video 以便 Web 端正确展示，
+    # 但仍下载原始 document 对象（is_source_file 标记真实大小来源）。
+    stored_media_type = media_type
+    if media_type == 'document' and mime_type:
+        if mime_type.startswith('video/'):
+            stored_media_type = 'video'
+        elif mime_type.startswith('image/'):
+            stored_media_type = 'photo'
+
+    return {
+        'message': message,
+        'media_type': stored_media_type,
+        'file_id': getattr(media_obj, 'file_id', None) or f"user_api:{getattr(chat, 'id', 'unknown')}:{message.id}",
+        'file_unique_id': getattr(media_obj, 'file_unique_id', None) or f"user_api:{getattr(chat, 'id', 'unknown')}:{message.id}",
+        'file_size': getattr(media_obj, 'file_size', 0) or 0,
+        'is_source_file': is_source_file,
+        'caption': message.caption or '',
+        'ext': ext,
+        'source': source,
+        'source_id': str(getattr(chat, 'id', '')),
+        'source_link': source_link,
+        'source_type': _enum_value(getattr(chat, 'type', None)),
+        'media_group_id': str(getattr(message, 'media_group_id', '') or ''),
+        'message_id': message.id,
+    }
+
+
+async def _get_message_media_info(chat_id, message_id):
+    client = get_pyrogram_client()
+    message = await client.get_messages(chat_id, message_id)
+    return _message_media_info(message)
+
+
+async def _get_link_media_items(chat_id, message_id):
+    client = get_pyrogram_client()
+    message = await client.get_messages(chat_id, message_id)
+    if not message or not message.media:
+        return []
+
+    messages = [message]
+    if getattr(message, 'media_group_id', None):
+        try:
+            messages = await message.get_media_group()
+        except Exception as e:
+            logger.warning(f"获取链接媒体组失败，回退为单条消息: {e}")
+            messages = [message]
+
+    items = []
+    for item_message in sorted(messages, key=lambda m: m.id):
+        info = _message_media_info(item_message)
+        if info:
+            items.append(info)
+    return items
+
+
+async def _download_message_media(chat_id, message_id, final_path, progress_callback=None):
+    async with _semaphore:
+        client = get_pyrogram_client()
+        message = await client.get_messages(chat_id, message_id)
+        if not message or not message.media:
+            return None
+        # 优先下载原始 document 源文件（与 _message_media_info 选择保持一致）：
+        # 仅当 document 是视频/图片源文件时才用它，否则下载消息本身的主媒体。
+        document = getattr(message, 'document', None)
+        target = document if _is_media_document(document) else message
+        return await client.download_media(target, file_name=final_path, progress=progress_callback)
+
 
 async def _do_download(chat_id, message_id, final_path, progress_callback=None, file_unique_id=None):
     # 使用信号量强制排队，匹配用户观察到的物理串行特性，UI 表现也最整齐
@@ -285,6 +479,49 @@ def run_download_large_file(chat_id, message_id, final_path, progress_callback=N
         return future.result(timeout=3600)
     except Exception as e:
         logger.error(f"User API 任务执行抛出异常: {e}", exc_info=True)
+        return False
+
+
+def run_get_message_media_info(chat_id, message_id):
+    """同步获取 User API 可见消息的媒体信息。"""
+    get_pyrogram_client()
+    future = asyncio.run_coroutine_threadsafe(
+        _get_message_media_info(chat_id, message_id),
+        _loop
+    )
+    try:
+        return future.result(timeout=120)
+    except Exception as e:
+        logger.error(f"User API 获取链接消息失败: {e}", exc_info=True)
+        return None
+
+
+def run_get_link_media_items(chat_id, message_id):
+    """同步获取链接消息对应的媒体列表；媒体组会展开为整组。"""
+    get_pyrogram_client()
+    future = asyncio.run_coroutine_threadsafe(
+        _get_link_media_items(chat_id, message_id),
+        _loop
+    )
+    try:
+        return future.result(timeout=120)
+    except Exception as e:
+        logger.error(f"User API 获取链接媒体列表失败: {e}", exc_info=True)
+        return []
+
+
+def run_download_message_media(chat_id, message_id, final_path, progress_callback=None):
+    """同步下载 User API 可见消息中的媒体。"""
+    get_pyrogram_client()
+    future = asyncio.run_coroutine_threadsafe(
+        _download_message_media(chat_id, message_id, final_path, progress_callback),
+        _loop
+    )
+    try:
+        downloaded_path = future.result(timeout=3600)
+        return bool(downloaded_path and os.path.exists(downloaded_path))
+    except Exception as e:
+        logger.error(f"User API 链接下载任务失败: {e}", exc_info=True)
         return False
 
 def stop_user_api():

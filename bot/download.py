@@ -30,6 +30,65 @@ MEDIA_LABELS = {
     'document': '图片文件',
 }
 
+DOWNLOAD_METHOD_BOT = 'bot_api'
+DOWNLOAD_METHOD_USER = 'user_api'
+
+
+def get_media_label(media_type):
+    return MEDIA_LABELS.get(media_type, media_type or '媒体')
+
+
+def get_media_ext(media_info):
+    ext = media_info.get('ext')
+    if ext:
+        return ext
+    media_type = media_info.get('media_type')
+    if media_type == 'video':
+        return '.mp4'
+    if media_type == 'animation':
+        return '.gif'
+    if media_type == 'document':
+        return '.jpg'
+    return '.jpg'
+
+
+def build_download_filename(media_info, index=None, media_group_id=None, group_prefix=None):
+    ext = get_media_ext(media_info)
+    if media_group_id and index is not None:
+        prefix = group_prefix or generate_temp_filename(media_group_id)
+        return f"{media_group_id}_{index}_{prefix}{ext}"
+    return f"{generate_temp_filename()}{ext}"
+
+
+def build_progress_bar(media_items, items_status, item_progress):
+    bot_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌"}
+    user_map = {0: "🕓", 1: "🟢", 2: "♻️", 3: "🔴"}
+    parts = []
+    for i, status in enumerate(items_status):
+        method = media_items[i].get('download_method', DOWNLOAD_METHOD_BOT)
+        is_user_api = method == DOWNLOAD_METHOD_USER
+        if status == 4:
+            parts.append(f"{'☁️' if is_user_api else '🔽'}{item_progress[i]}%")
+        else:
+            parts.append((user_map if is_user_api else bot_map).get(status, "❓"))
+    return "".join(parts)
+
+
+def save_media_metadata(user, media_info, final_filename, save_dir, media_group_id=None, fallback_link=None):
+    media_obj_stub = type('Media', (), {
+        'file_id': media_info['file_id'],
+        'file_unique_id': media_info['file_unique_id'],
+    })
+    return save_to_db(
+        user, media_obj_stub, final_filename,
+        save_dir=save_dir, media_group_id=media_group_id,
+        media_type=media_info.get('media_type', 'photo'),
+        caption=media_info.get('caption'),
+        source=media_info.get('source'), source_id=media_info.get('source_id'),
+        source_link=media_info.get('source_link') or fallback_link,
+        source_type=media_info.get('source_type'),
+    )
+
 
 def _single_buttons(single_key, is_dup, has_failed):
     """构造单条消息的操作按钮。
@@ -161,26 +220,37 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
         prefix=f"⏳ 正在通过 User API 下载大{label}...",
     )
 
+    link_chat_id = record.get('link_chat_id')
+    link_msg_id = record.get('link_message_id')
     orig_chat_id = record.get('orig_chat_id')
     orig_msg_id = record.get('orig_msg_id')
     chat_id = record['chat_id']
     chat_type = record.get('chat_type')
     source_type = record.get('source_type')
 
-    target_chat_id = orig_chat_id or chat_id
-    target_msg_id = orig_msg_id or record['message_id']
-    if not orig_chat_id and (chat_type == 'private' or source_type in ["user", "private_user"]):
+    target_chat_id = link_chat_id or orig_chat_id or chat_id
+    target_msg_id = link_msg_id or orig_msg_id or record['message_id']
+    if not link_chat_id and not orig_chat_id and (chat_type == 'private' or source_type in ["user", "private_user"]):
         target_chat_id = bot.username or bot.id
 
     file_unique_id = record['file_unique_id']
-    success = await loop.run_in_executor(
-        None,
-        lambda: user_api.run_download_large_file(
-            target_chat_id, target_msg_id, final_path,
-            progress_callback=progress, file_unique_id=file_unique_id,
-        ),
-    )
-    if not success and target_chat_id != chat_id:
+    if link_chat_id:
+        success = await loop.run_in_executor(
+            None,
+            lambda: user_api.run_download_message_media(
+                target_chat_id, target_msg_id, final_path,
+                progress_callback=progress,
+            ),
+        )
+    else:
+        success = await loop.run_in_executor(
+            None,
+            lambda: user_api.run_download_large_file(
+                target_chat_id, target_msg_id, final_path,
+                progress_callback=progress, file_unique_id=file_unique_id,
+            ),
+        )
+    if not success and not link_chat_id and target_chat_id != chat_id:
         logger.warning(f"大{label}溯源重下失败，尝试从本地聊天回退下载...")
         fallback_chat_id = chat_id
         if chat_type == 'private' or source_type in ["user", "private_user"]:

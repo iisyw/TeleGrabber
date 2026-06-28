@@ -23,6 +23,7 @@ from utils import (
 import user_api
 from bot import state
 from bot.helpers import get_forward_source_info
+from bot.download import DOWNLOAD_METHOD_BOT, DOWNLOAD_METHOD_USER, build_progress_bar, _stub_user
 
 
 def load_media_groups_collection():
@@ -145,10 +146,21 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
             }
             need_queue_hint = state.is_processing_media_group or bool(state.pending_media_groups)
         else:
-            state.active_collections[collection_key]['media_items'].append(media_info)
+            existing_items = state.active_collections[collection_key]['media_items']
+            # 二次更新去重：同一条消息被 Telegram 多次推送 (如先发后改) 时，
+            # message_id 相同则视为同一项，仅更新不重复追加，避免组内出现重复/错位。
+            duplicate = False
+            if media_info['message_id'] is not None:
+                for existing in existing_items:
+                    if existing.get('message_id') == media_info['message_id']:
+                        existing.update(media_info)
+                        duplicate = True
+                        break
+            if not duplicate:
+                existing_items.append(media_info)
             if not state.active_collections[collection_key].get('caption') and message and message.caption:
                 state.active_collections[collection_key]['caption'] = message.caption
-            logger.debug(f"媒体组 {media_group_id} 追加{media_type}，总数: {len(state.active_collections[collection_key]['media_items'])}")
+            logger.debug(f"媒体组 {media_group_id} 追加{media_type}，总数: {len(existing_items)}")
         count = len(state.active_collections[collection_key]['media_items'])
 
     # 仅首条发送状态消息（await 放在锁外），发完回填 message_id
@@ -304,7 +316,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
 
     # 准备目录
     user_id = group_info.get('user_id')
-    user_obj = type('User', (), {'id': user_id, 'username': user_name, 'first_name': user_name})
+    user_obj = _stub_user({'user_id': user_id, 'user_name': user_name})
     source = group_info.get('source')
     source_type = group_info.get('source_type')
     save_dir = get_save_directory(user_obj, source, source_type)
@@ -316,6 +328,8 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
 
     items_status = [item.get('status', 0) for item in media_items]
     item_progress = [0] * total_items
+    for item in media_items:
+        item.setdefault('download_method', DOWNLOAD_METHOD_BOT)
 
     base_timestamp = group_info.get('base_timestamp')
     if not base_timestamp:
@@ -327,19 +341,8 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
     processed_count = {"value": sum(1 for s in items_status if s in [1, 2])}
 
     def get_progress_bar():
-        # 小文件 (Bot API) 与大文件 (User API) 用两套 emoji，全程一眼区分；
-        # 是否大文件由 file_size 决定，收集阶段已知，无需等下载。
-        small_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌"}
-        large_map = {0: "🕓", 1: "🟢", 2: "♻️", 3: "🔴"}  # 重复(2)两者共用 ♻️
-        res = []
-        for i, s in enumerate(items_status):
-            is_large = (media_items[i].get('file_size', 0) or 0) >= 20 * 1024 * 1024
-            if s == 4:  # 下载中
-                res.append(f"{'☁️' if is_large else '🔽'}{item_progress[i]}%")
-            else:
-                table = large_map if is_large else small_map
-                res.append(table.get(s, "❓"))
-        return "".join(res)
+        # emoji 按实际下载通道区分：Bot API 用 ⏳/🔽/✅/❌，User API 用 🕓/☁️/🟢/🔴。
+        return build_progress_bar(media_items, items_status, item_progress)
 
     def update_ui_async():
         if is_finished["value"] or not status_message_id:
@@ -397,42 +400,56 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
 
         try:
             file_size = media_info.get('file_size', 0)
+            media_info['download_method'] = media_info.get('download_method', DOWNLOAD_METHOD_BOT)
+            force_user_api = media_info.get('download_method') == DOWNLOAD_METHOD_USER
 
-            # 大文件走 User API (本身就是同步阻塞调用，线程里直接调)
-            if USER_API_ENABLED and file_size >= 20 * 1024 * 1024:
-                ext = ".mp4" if media_info.get('media_type') == 'video' else ".jpg"
+            # 大文件或 /link 来源走 User API (本身就是同步阻塞调用，线程里直接调)
+            if force_user_api or (USER_API_ENABLED and file_size >= 20 * 1024 * 1024):
+                media_info['download_method'] = DOWNLOAD_METHOD_USER
+                ext = media_info.get('ext') or (".mp4" if media_info.get('media_type') == 'video' else ".jpg")
                 final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
                 final_path = os.path.join(save_dir, final_filename)
-                logger.info(f"文件较大 ({file_size/1024/1024:.1f}MB)，切换至 User API 下载: {index}")
+                if force_user_api:
+                    logger.info(f"链接媒体组项使用 User API 下载: {index}")
+                else:
+                    logger.info(f"文件较大 ({file_size/1024/1024:.1f}MB)，切换至 User API 下载: {index}")
 
                 with progress_lock:
                     items_status[index - 1] = 4
                     item_progress[index - 1] = 0
 
-                def p_callback(current, total):
+                def p_callback(current, total, idx=index):
                     if total > 0:
                         percent = int(current * 100 / total)
-                        if percent != item_progress[index - 1]:
+                        if percent != item_progress[idx - 1]:
                             with progress_lock:
-                                item_progress[index - 1] = percent
+                                item_progress[idx - 1] = percent
                             update_ui_async()
                     else:
                         update_ui_async()
 
+                link_chat_id = media_info.get('link_chat_id')
+                link_msg_id = media_info.get('link_message_id')
                 orig_chat_id = media_info.get('orig_chat_id')
                 orig_msg_id = media_info.get('orig_msg_id')
-                target_chat_id = orig_chat_id or chat_id
-                target_msg_id = orig_msg_id or media_info['message_id']
-                if not orig_chat_id:
+                target_chat_id = link_chat_id or orig_chat_id or chat_id
+                target_msg_id = link_msg_id or orig_msg_id or media_info['message_id']
+                if not link_chat_id and not orig_chat_id:
                     chat_type = group_info.get('chat_type')
                     if chat_type == 'private' or source_type in ["user", "private_user"]:
                         target_chat_id = bot_username or chat_id
 
-                success = user_api.run_download_large_file(
-                    target_chat_id, target_msg_id, final_path,
-                    progress_callback=p_callback, file_unique_id=file_unique_id,
-                )
-                if not success and target_chat_id != chat_id:
+                if link_chat_id:
+                    success = user_api.run_download_message_media(
+                        target_chat_id, target_msg_id, final_path,
+                        progress_callback=p_callback,
+                    )
+                else:
+                    success = user_api.run_download_large_file(
+                        target_chat_id, target_msg_id, final_path,
+                        progress_callback=p_callback, file_unique_id=file_unique_id,
+                    )
+                if not success and not link_chat_id and target_chat_id != chat_id:
                     logger.warning(f"媒体项 {index} 溯源下载失败，尝试从本地聊天回退下载...")
                     fallback_chat_id = chat_id
                     chat_type = group_info.get('chat_type')
@@ -447,9 +464,11 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                     media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': file_unique_id})
                     save_to_db(user_obj, media_obj_stub, final_filename,
                                save_dir=save_dir, media_group_id=media_group_id,
-                               media_type=media_info.get('media_type', 'photo'), caption=caption,
+                               media_type=media_info.get('media_type', 'photo'),
+                               caption=media_info.get('caption') or caption,
                                source=source, source_id=group_info.get('source_id'),
-                               source_link=group_info.get('source_link'), source_type=source_type)
+                               source_link=media_info.get('source_link') or group_info.get('source_link'),
+                               source_type=source_type)
                     with progress_lock:
                         items_status[index - 1] = 1
                         media_info['status'] = 1
@@ -479,9 +498,11 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
             media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': file_unique_id})
             db_success = save_to_db(user_obj, media_obj_stub, final_filename,
                                     save_dir=save_dir, media_group_id=media_group_id,
-                                    media_type=media_type, caption=caption,
+                                    media_type=media_type,
+                                    caption=media_info.get('caption') or caption,
                                     source=source, source_id=group_info.get('source_id'),
-                                    source_link=group_info.get('source_link'), source_type=source_type)
+                                    source_link=media_info.get('source_link') or group_info.get('source_link'),
+                                    source_type=source_type)
             if not db_success:
                 raise Exception("元数据保存数据库失败 (可能数据库被锁定)")
 
@@ -527,8 +548,9 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                 if dup.get('source_link'):
                     source_display = f"[{dup['source']}]({dup['source_link']})"
                 finish_text += f" - 第{dup['index']}项 -> `{dup['filename']}` (来源: {source_display}，原标题: {dup['caption']})\n"
+        failed_count = sum(1 for s in items_status if s == 3)
         if has_failed:
-            finish_text += f"\n⚠️ 有部分项下载失败，您可以点击下方按钮重试。"
+            finish_text += f"\n⚠️ 有 {failed_count} 项下载失败，点击「❌ 重试失败项」仅重试这些失败项。"
 
         keyboard = [[
             InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
@@ -536,7 +558,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
         ]]
         row2 = [InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")]
         if has_failed:
-            row2.insert(0, InlineKeyboardButton("❌ 重试失败项", callback_data=f"mg_retry_failed:{collection_key}"))
+            row2.insert(0, InlineKeyboardButton(f"❌ 重试失败项({failed_count})", callback_data=f"mg_retry_failed:{collection_key}"))
         keyboard.append(row2)
 
         _edit_status_threadsafe(
