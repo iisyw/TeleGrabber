@@ -25,14 +25,13 @@ TeleGrabber/
 ├── utils.py               # 数据库与工具函数
 ├── user_api.py            # MTProto (User API) 下载引擎
 ├── web_backend.py         # Web 后端服务 (FastAPI)
-├── bot/                   # 机器人逻辑
+├── bot/                   # 机器人逻辑 (python-telegram-bot v21, async)
 │   ├── handlers.py        # 照片/视频/文档/动画处理器
+│   ├── download.py        # 单条消息下载公共逻辑
 │   ├── media_group.py     # 媒体组收集与并发下载
 │   ├── callbacks.py       # 按钮回调处理
 │   ├── helpers.py         # 装饰器、转发溯源等
 │   └── state.py           # 全局共享状态
-├── scripts/
-│   └── patch_lib.py       # python-telegram-bot 的 Py3.12 兼容补丁
 ├── static/                # Web 前端静态资源 (HTML/CSS/JS)
 ├── requirements.txt       # 依赖列表
 ├── data/.env.example      # 环境变量模板
@@ -55,12 +54,6 @@ cd telegrabber
 ```bash
 pip install -r requirements.txt
 ```
-
-> 如果你使用 Python 3.12+，需要额外运行兼容补丁脚本（修复 python-telegram-bot 13.7 的 vendored urllib3）：
->
-> ```bash
-> python scripts/patch_lib.py
-> ```
 
 3. 创建配置文件：
 

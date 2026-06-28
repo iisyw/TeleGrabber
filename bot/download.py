@@ -1,10 +1,13 @@
 """单条消息下载的公共逻辑：去重提示、大文件 User API 下载（含进度）、小文件 Bot API 下载。
 
 四个 handler (photo/video/document/animation) 共用这里的函数，避免重复代码。
+适配 python-telegram-bot v21：handler 为 async，bot 调用需 await；
+Pyrogram (User API) 仍跑在自己的事件循环线程里，通过同步封装在 executor 中调用。
 """
 
 import os
 import time
+import asyncio
 import threading
 
 from config import logger, USER_API_ENABLED
@@ -26,7 +29,7 @@ MEDIA_LABELS = {
 }
 
 
-def reply_duplicate(update, media_obj, media_type, caption):
+async def reply_duplicate(update, media_obj, media_type, caption):
     """检测重复资源，若重复则回复完整提示并返回 True。"""
     dup_info = get_duplicate_info(media_obj.file_unique_id)
     if not dup_info:
@@ -44,7 +47,7 @@ def reply_duplicate(update, media_obj, media_type, caption):
         f"最初描述: {dup_info.get('caption') or '无'}\n"
         f"当前描述: {caption or '无'}"
     )
-    update.message.reply_text(
+    await update.message.reply_text(
         reply_msg,
         parse_mode='Markdown',
         disable_web_page_preview=True,
@@ -53,47 +56,49 @@ def reply_duplicate(update, media_obj, media_type, caption):
     return True
 
 
-def _make_progress_callback(context, chat_id, status_message_id, prefix):
-    """生成一个带节流的下载进度回调 (Pyrogram 签名: current, total)。
+def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix):
+    """生成下载进度回调 (Pyrogram 签名: current, total)。
 
-    Telegram 对消息编辑有频率限制，故至少间隔 2 秒、且百分比变化时才更新；
-    更新在独立线程中进行，不阻塞下载。
+    回调在 Pyrogram 的事件循环线程里被调用，这里通过 run_coroutine_threadsafe
+    把消息编辑调度回 PTB 的主事件循环（bot.edit_message_text 是协程）。
+    带节流：百分比变化且至少间隔 2 秒才更新，100% 强制更新。
     """
-    state = {"last_time": 0.0, "last_percent": -1}
+    st = {"last_time": 0.0, "last_percent": -1}
 
     def callback(current, total):
         if not total:
             return
         percent = int(current * 100 / total)
         now = time.time()
-        if percent == state["last_percent"]:
+        if percent == st["last_percent"]:
             return
-        if now - state["last_time"] < 2 and percent < 100:
+        if now - st["last_time"] < 2 and percent < 100:
             return
-        state["last_time"] = now
-        state["last_percent"] = percent
+        st["last_time"] = now
+        st["last_percent"] = percent
 
-        def _edit():
+        async def _edit():
             try:
-                context.bot.edit_message_text(
+                await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=status_message_id,
                     text=f"{prefix}\n进度: {percent}%",
                 )
             except Exception:
                 pass
-        threading.Thread(target=_edit, daemon=True).start()
+        try:
+            asyncio.run_coroutine_threadsafe(_edit(), loop)
+        except Exception:
+            pass
 
     return callback
 
 
-def download_large_via_user_api(update, context, media_obj, media_type, date_dir,
-                                ext, source_info, status_message):
+async def download_large_via_user_api(update, context, media_obj, media_type, date_dir,
+                                      ext, source_info, status_message):
     """通过 User API 下载大文件（含进度、溯源、回退、存库）。返回最终文件名或 None。
 
-    media_obj: 带 file_id / file_unique_id 的对象
-    source_info: (source, source_id, source_link, source_type, orig_chat_id, orig_msg_id)
-    status_message: 已发送的"正在下载"消息对象，用于刷新进度
+    User API 调用是阻塞的，放到默认线程池执行，避免阻塞 PTB 事件循环。
     """
     source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = source_info
 
@@ -103,9 +108,10 @@ def download_large_via_user_api(update, context, media_obj, media_type, date_dir
 
     chat = update.effective_chat
     label = MEDIA_LABELS.get(media_type, '文件')
+    loop = asyncio.get_running_loop()
 
     progress = _make_progress_callback(
-        context, chat.id, status_message.message_id,
+        context.bot, loop, chat.id, status_message.message_id,
         prefix=f"⏳ 正在通过 User API 下载大{label}...",
     ) if status_message else None
 
@@ -115,10 +121,13 @@ def download_large_via_user_api(update, context, media_obj, media_type, date_dir
     if not orig_chat_id and (chat.type == 'private' or source_type in ["user", "private_user"]):
         target_chat_id = context.bot.username or context.bot.id
 
-    success = user_api.run_download_large_file(
-        target_chat_id, target_msg_id, final_path,
-        progress_callback=progress,
-        file_unique_id=media_obj.file_unique_id,
+    success = await loop.run_in_executor(
+        None,
+        lambda: user_api.run_download_large_file(
+            target_chat_id, target_msg_id, final_path,
+            progress_callback=progress,
+            file_unique_id=media_obj.file_unique_id,
+        ),
     )
 
     # 溯源失败则回退到当前聊天下载
@@ -127,10 +136,13 @@ def download_large_via_user_api(update, context, media_obj, media_type, date_dir
         fallback_chat_id = chat.id
         if chat.type == 'private' or source_type in ["user", "private_user"]:
             fallback_chat_id = context.bot.username or context.bot.id
-        success = user_api.run_download_large_file(
-            fallback_chat_id, update.message.message_id, final_path,
-            progress_callback=progress,
-            file_unique_id=media_obj.file_unique_id,
+        success = await loop.run_in_executor(
+            None,
+            lambda: user_api.run_download_large_file(
+                fallback_chat_id, update.message.message_id, final_path,
+                progress_callback=progress,
+                file_unique_id=media_obj.file_unique_id,
+            ),
         )
 
     if not success:
@@ -144,12 +156,11 @@ def download_large_via_user_api(update, context, media_obj, media_type, date_dir
     return final_filename
 
 
-def save_small_file(update, media_obj, media_type, date_dir, source_info,
-                    detect_ext, status_message=None):
+async def save_small_file(update, media_obj, media_type, date_dir, source_info, detect_ext):
     """通过 Bot API 下载小文件并存库。返回最终文件名或 None。
 
-    detect_ext: 接收临时文件路径、返回扩展名的回调（不同媒体类型检测方式不同）
-    status_message: 可选的"处理中"消息，完成后会被编辑为结果
+    v21 中 get_file() 与 file.download_to_drive() 均为协程。
+    detect_ext 与 save_to_db 是同步的轻量操作，直接调用即可。
     """
     source, source_id, source_link, source_type, _, _ = source_info
 
@@ -157,8 +168,8 @@ def save_small_file(update, media_obj, media_type, date_dir, source_info,
     temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
 
     try:
-        media_file = media_obj.get_file()
-        media_file.download(temp_path)
+        media_file = await media_obj.get_file()
+        await media_file.download_to_drive(temp_path)
 
         ext = detect_ext(temp_path)
         final_filename = f"{temp_filename}{ext}"

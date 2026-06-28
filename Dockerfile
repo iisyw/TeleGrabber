@@ -23,10 +23,6 @@ RUN apk add --no-cache --virtual .build-deps gcc musl-dev libffi-dev \
     && pip install --no-cache-dir -r requirements.txt \
     && apk del .build-deps
 
-# 应用库文件补丁 (修复 Python 3.12 兼容性问题)
-COPY scripts/patch_lib.py ./scripts/patch_lib.py
-RUN python scripts/patch_lib.py
-
 # 复制项目文件
 COPY . .
 

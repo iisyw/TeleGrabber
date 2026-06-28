@@ -1,17 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-# 在所有导入之前过滤警告
-import warnings
-warnings.filterwarnings("ignore", message="python-telegram-bot is using upstream urllib3")
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
-
 import sys
-import time
 import threading
 
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler
-import telegram.error
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+)
 
 from config import TOKEN, logger, get_connection_args, USER_API_ENABLED, WEB_PORT
 import bot
@@ -20,88 +15,69 @@ import user_api
 import web_backend
 
 
+def build_application():
+    """根据配置构造 python-telegram-bot v21 的 Application。"""
+    builder = ApplicationBuilder().token(TOKEN)
+
+    conn = get_connection_args()
+    if 'connect_timeout' in conn:
+        builder = builder.connect_timeout(conn['connect_timeout'])
+    if 'read_timeout' in conn:
+        builder = builder.read_timeout(conn['read_timeout'])
+    if conn.get('proxy'):
+        builder = builder.proxy(conn['proxy']).get_updates_proxy(conn['get_updates_proxy'])
+
+    app = builder.build()
+
+    # 命令处理器
+    app.add_handler(CommandHandler("start", bot.start))
+    app.add_handler(CommandHandler("help", bot.help_command))
+
+    # 媒体处理器
+    app.add_handler(MessageHandler(filters.PHOTO, bot.process_photo))
+    app.add_handler(MessageHandler(filters.VIDEO, bot.process_video))
+    app.add_handler(MessageHandler(filters.ANIMATION, bot.process_animation))
+    app.add_handler(MessageHandler(filters.Document.IMAGE, bot.download_document))
+
+    # 兜底：其他消息提示不支持
+    app.add_handler(MessageHandler(filters.ALL, bot.handle_unsupported))
+
+    # 回调处理器 (媒体组按钮)
+    app.add_handler(CallbackQueryHandler(bot.handle_callback_query))
+
+    return app
+
+
 def main() -> None:
     """主程序入口"""
     if not TOKEN:
-        logger.error("请在.env文件中设置TELEGRAM_BOT_TOKEN环境变量")
+        logger.error("请在 data/.env 文件中设置 TELEGRAM_BOT_TOKEN 环境变量")
         return
 
-    # 初始化数据库和状态
+    # 初始化数据库与媒体组状态
     init_db()
     bot.load_media_groups_collection()
 
-    # 预启动 User API (如果启用)
+    # 预启动 User API (MTProto)；放后台线程，避免首次登录阻塞
     if USER_API_ENABLED:
         logger.info("检测到 API 凭据，准备初始化 User API (MTProto)...")
-        # 使用线程启动，防止因为首次登录需要输入手机号/验证码而阻塞机器人启动
-        user_api_thread = threading.Thread(target=user_api.start_user_api, daemon=True)
-        user_api_thread.start()
+        threading.Thread(target=user_api.start_user_api, daemon=True).start()
         logger.info("User API 初始化已在后台启动，如需登录请关注终端提示")
 
-    # 重试机制
-    max_retries = 5
-    retry_delay = 5  # 初始延迟5秒
+    # 启动 Web 管理后台 (独立线程，自带 uvicorn 事件循环)
+    logger.info(f"正在启动 Web 管理后台 (http://0.0.0.0:{WEB_PORT})...")
+    threading.Thread(target=web_backend.run_server, args=(WEB_PORT,), daemon=True).start()
 
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"尝试连接Telegram API (尝试 {attempt + 1}/{max_retries})...")
-
-            # 使用配置的连接参数创建Updater
-            updater = Updater(TOKEN, request_kwargs=get_connection_args())
-            dispatcher = updater.dispatcher
-
-            # 注册命令处理器
-            dispatcher.add_handler(CommandHandler("start", bot.start))
-            dispatcher.add_handler(CommandHandler("help", bot.help_command))
-
-            # 注册消息处理器
-            dispatcher.add_handler(MessageHandler(Filters.photo, bot.process_photo))
-            dispatcher.add_handler(MessageHandler(Filters.video, bot.process_video))
-            dispatcher.add_handler(MessageHandler(Filters.animation, bot.process_animation))
-            dispatcher.add_handler(MessageHandler(Filters.document.image, bot.download_document))
-
-            # 注册回调处理器 (针对媒体组按钮)
-            dispatcher.add_handler(CallbackQueryHandler(bot.handle_callback_query))
-
-            # 启动机器人
-            logger.info("启动机器人...")
-
-            # 同时启动 Web 管理后台
-            logger.info(f"正在启动 Web 管理后台 (http://0.0.0.0:{WEB_PORT})...")
-            web_thread = threading.Thread(target=web_backend.run_server, args=(WEB_PORT,), daemon=True)
-            web_thread.start()
-
-            updater.start_polling()
-            logger.info("机器人已启动，正在监听消息...")
-
-            # 持续运行，直到按Ctrl-C停止
-            updater.idle()
-
-            # 如果正常运行到这里，就跳出重试循环
-            break
-
-        except telegram.error.NetworkError as e:
-            if attempt < max_retries - 1:
-                logger.error(f"连接失败: {str(e)}. 将在 {retry_delay} 秒后重试...")
-                time.sleep(retry_delay)
-                # 指数退避策略，每次重试增加延迟时间
-                retry_delay = min(retry_delay * 2, 60)  # 最大延迟60秒
-            else:
-                logger.error(f"经过 {max_retries} 次尝试后仍无法连接。请检查网络或代理设置。")
-                logger.error(f"错误详情: {str(e)}")
-                logger.info("提示：如果您在中国大陆或网络受限区域，请考虑设置代理。")
-                logger.info("您可以在.env文件中添加PROXY_URL环境变量，例如：")
-                logger.info("PROXY_URL=socks5h://127.0.0.1:7890")
-                break
-        except Exception as e:
-            logger.error(f"发生未知错误: {str(e)}")
-            break
+    logger.info("启动机器人...")
+    app = build_application()
+    # run_polling 自行管理事件循环，并在 SIGINT/SIGTERM 时优雅退出
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == '__main__':
     try:
         main()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         logger.info("程序被用户中断")
     finally:
         if USER_API_ENABLED:

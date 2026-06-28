@@ -28,9 +28,9 @@ def is_user_allowed(update) -> bool:
 
 
 def restricted(func):
-    """装饰器函数，仅允许特定用户访问"""
+    """装饰器：仅允许特定用户访问 (适配 async handler)"""
     @functools.wraps(func)
-    def wrapped(update, context, *args, **kwargs):
+    async def wrapped(update, context, *args, **kwargs):
         if not is_user_allowed(update):
             user_id = update.effective_user.id
             current_time = time.time()
@@ -44,26 +44,11 @@ def restricted(func):
                     f"您可以在GitHub上部署自己的TeleGrabber实例：\n"
                     f"{GITHUB_REPO}"
                 )
-                update.message.reply_text(unauthorized_message)
+                await update.message.reply_text(unauthorized_message)
                 state.user_notification_cache[user_id] = current_time
             return
-        return func(update, context, *args, **kwargs)
+        return await func(update, context, *args, **kwargs)
     return wrapped
-
-
-def download_with_retry(file_obj, path, retries=3):
-    """带重试机制的文件下载"""
-    for i in range(retries):
-        try:
-            file_obj.download(path)
-            return True
-        except Exception as e:
-            if i == retries - 1:
-                raise
-            wait = (i + 1) * 2
-            logger.warning(f"下载失败: {e}，将在 {wait}s 后进行第 {i+2} 次重试...")
-            time.sleep(wait)
-    return False
 
 
 def get_forward_source_info(message):

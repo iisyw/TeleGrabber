@@ -87,15 +87,17 @@ if not os.path.exists(SAVE_DIR):
     logger.info(f"已创建下载目录: {SAVE_DIR}")
 
 def get_connection_args():
-    """获取连接参数设置"""
-    connection_args = {
-        'connect_timeout': TIMEOUT, 
-        'read_timeout': TIMEOUT
+    """获取连接参数 (适配 python-telegram-bot v21 的 ApplicationBuilder)。
+
+    返回一个 dict，键对应 ApplicationBuilder 的方法名，main.py 据此链式配置。
+    """
+    args = {
+        'connect_timeout': TIMEOUT,
+        'read_timeout': TIMEOUT,
     }
-    
-    # 如果设置了代理，就使用代理
     if PROXY:
-        connection_args['proxy_url'] = PROXY
+        # v21 用 httpx，代理通过 proxy=/get_updates_proxy= 传入
+        args['proxy'] = PROXY
+        args['get_updates_proxy'] = PROXY
         logger.info(f"使用代理: {mask_proxy_url(PROXY)}")
-    
-    return connection_args 
+    return args

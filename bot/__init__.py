@@ -7,6 +7,7 @@ from .handlers import (
     process_video,
     download_document,
     process_animation,
+    handle_unsupported,
 )
 from .callbacks import handle_callback_query
 from .media_group import load_media_groups_collection
@@ -18,6 +19,7 @@ __all__ = [
     "process_video",
     "download_document",
     "process_animation",
+    "handle_unsupported",
     "handle_callback_query",
     "load_media_groups_collection",
 ]
