@@ -1,19 +1,56 @@
 import os
 import sqlite3
 import logging
-from fastapi import FastAPI, HTTPException, Query
+import secrets
+from fastapi import FastAPI, HTTPException, Query, Depends, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import uvicorn
 from utils import DB_PATH, SAVE_DIR, delete_media_records
+from config import WEB_USERNAME, WEB_PASSWORD
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("web_backend")
 
 app = FastAPI(title="TeleGrabber Web Management")
+
+# --- HTTP Basic Auth ---
+# 凭据来自 .env (WEB_USERNAME / WEB_PASSWORD)。
+# 若 WEB_PASSWORD 为空，则视为未启用鉴权：只读接口开放，写操作(删除)接口禁用。
+security = HTTPBasic(auto_error=False)
+AUTH_ENABLED = bool(WEB_PASSWORD)
+
+if not AUTH_ENABLED:
+    logger.warning("Web 后台未设置 WEB_PASSWORD，删除等写操作接口已禁用。请在 .env 中配置以启用完整功能。")
+
+
+def require_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    """校验 Basic Auth 凭据。未配置密码时直接拒绝写操作。"""
+    if not AUTH_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="写操作已禁用：服务器未配置 WEB_PASSWORD",
+        )
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="需要登录",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    # 使用 compare_digest 防止时序攻击
+    user_ok = secrets.compare_digest(credentials.username, WEB_USERNAME)
+    pass_ok = secrets.compare_digest(credentials.password, WEB_PASSWORD)
+    if not (user_ok and pass_ok):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 # 数据模型
 class MediaRecord(BaseModel):
@@ -36,7 +73,7 @@ if not os.path.exists(SAVE_DIR):
 app.mount("/media", StaticFiles(directory=SAVE_DIR), name="media")
 
 # 静态资源映射 (html, css, js)
-static_dir = os.path.join(os.path.dirname(__file__), "static")
+static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if not os.path.exists(static_dir):
     os.makedirs(static_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -107,7 +144,7 @@ def get_media(
         ]
     except Exception as e:
         logger.error(f"获取媒体记录失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="获取媒体记录失败")
 
 @app.get("/api/media_groups")
 def get_media_groups(source: Optional[str] = None):
@@ -126,7 +163,8 @@ def get_media_groups(source: Optional[str] = None):
         conn.close()
         return groups
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"获取媒体组失败: {e}")
+        raise HTTPException(status_code=500, detail="获取媒体组失败")
 
 @app.get("/api/sources")
 def get_sources():
@@ -140,7 +178,7 @@ def get_sources():
         return sources
     except Exception as e:
         logger.error(f"获取来源列表失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="获取来源列表失败")
 
 @app.get("/api/stats")
 def get_stats():
@@ -153,10 +191,11 @@ def get_stats():
         conn.close()
         return {"total_count": count}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"获取统计信息失败: {e}")
+        raise HTTPException(status_code=500, detail="获取统计信息失败")
 
 @app.delete("/api/media/{id}")
-def delete_media(id: int):
+def delete_media(id: int, _user: str = Depends(require_auth)):
     """删除指定记录及物理文件 (按主键 ID)"""
     try:
         from utils import delete_media_by_id
@@ -165,12 +204,14 @@ def delete_media(id: int):
             return {"status": "success", "deleted_count": deleted_count}
         else:
             raise HTTPException(status_code=404, detail="未找到相关记录或文件已删除")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"删除媒体失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="删除媒体失败")
 
 @app.delete("/api/media_group/{media_group_id}")
-def delete_media_group(media_group_id: str):
+def delete_media_group(media_group_id: str, _user: str = Depends(require_auth)):
     """删除整个媒体组及其物理文件"""
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -184,9 +225,11 @@ def delete_media_group(media_group_id: str):
             
         deleted_count = delete_media_records(unique_ids)
         return {"status": "success", "deleted_count": deleted_count}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"批量删除媒体组失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="批量删除媒体组失败")
 
 def run_server(port=5000):
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

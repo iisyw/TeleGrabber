@@ -1,0 +1,563 @@
+"""媒体组收集、持久化与并发下载处理。"""
+
+import os
+import json
+import time
+import threading
+from datetime import datetime
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from config import logger, USER_API_ENABLED
+from utils import (
+    get_save_directory, generate_temp_filename, get_image_extension,
+    get_video_extension, save_to_db, get_duplicate_info, delete_media_records,
+)
+import user_api
+from bot import state
+from bot.helpers import download_with_retry, get_forward_source_info
+
+
+def load_media_groups_collection():
+    """从文件加载媒体组收集状态（仅在启动时调用一次）"""
+    try:
+        if not os.path.exists(state.MEDIA_GROUP_COLLECTION_FILE):
+            return {}
+
+        with open(state.MEDIA_GROUP_COLLECTION_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            state.active_collections = data
+            logger.info(f"已从磁盘恢复了 {len(state.active_collections)} 个媒体组收集状态")
+            return data
+    except Exception as e:
+        logger.error(f"加载媒体组收集状态失败: {e}")
+        return {}
+
+
+def save_media_groups_collection(collection=None):
+    """保存媒体组收集状态到文件（异步持久化）"""
+    if collection is None:
+        collection = state.active_collections
+
+    try:
+        os.makedirs(os.path.dirname(state.MEDIA_GROUP_COLLECTION_FILE), exist_ok=True)
+        temp_file = f"{state.MEDIA_GROUP_COLLECTION_FILE}.tmp"
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            serializable_collection = {}
+            for key, value in collection.items():
+                serializable_collection[key] = {
+                    'chat_id': value['chat_id'],
+                    'user_id': value['user_id'],
+                    'user_name': value['user_name'],
+                    'media_group_id': value['media_group_id'],
+                    'media_items': value['media_items'],
+                    'first_time': value['first_time'],
+                    'status_message_id': value.get('status_message_id'),
+                    'source': value.get('source'),
+                    'source_id': value.get('source_id'),
+                    'source_link': value.get('source_link'),
+                    'source_type': value.get('source_type'),
+                    'caption': value.get('caption')
+                }
+            json.dump(serializable_collection, f, ensure_ascii=False, indent=2)
+
+        os.replace(temp_file, state.MEDIA_GROUP_COLLECTION_FILE)
+        logger.debug("已将媒体组状态异步持久化到磁盘")
+    except Exception as e:
+        logger.error(f"保存媒体组收集状态失败: {e}")
+
+
+def add_photo_to_collection(media_group_id, chat_id, user, photo, context=None, message=None):
+    """将照片添加到媒体组收集中"""
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
+
+    if media_group_id:
+        return add_media_to_collection(
+            media_group_id, chat_id, user, photo, 'photo', context, message,
+            source, source_id, source_link, source_type,
+            chat_type=message.chat.type if message else None,
+            orig_chat_id=orig_chat_id,
+            orig_msg_id=orig_msg_id
+        )
+
+
+def add_video_to_collection(media_group_id, chat_id, user, video, context=None, message=None):
+    """将视频添加到媒体组收集中"""
+    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
+
+    if media_group_id:
+        return add_media_to_collection(
+            media_group_id, chat_id, user, video, 'video', context, message,
+            source, source_id, source_link, source_type,
+            chat_type=message.chat.type if message else None,
+            orig_chat_id=orig_chat_id,
+            orig_msg_id=orig_msg_id
+        )
+
+
+def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None,
+                            source=None, source_id=None, source_link=None, source_type=None,
+                            chat_type=None, orig_chat_id=None, orig_msg_id=None):
+    """将媒体（照片或视频）添加到媒体组收集中 (优化版：优先操作内存)"""
+    with state.media_group_lock:
+        collection_key = f"{chat_id}_{media_group_id}"
+
+        media_info = {
+            'file_id': media_obj.file_id,
+            'file_unique_id': media_obj.file_unique_id,
+            'media_type': media_type,
+            'message_id': message.message_id if message else None,
+            'file_size': getattr(media_obj, 'file_size', 0),
+            'orig_chat_id': orig_chat_id,
+            'orig_msg_id': orig_msg_id
+        }
+
+        is_first_media = collection_key not in state.active_collections
+        if is_first_media:
+            status_message = None
+            if context and message:
+                text = "⏳ 正在收集媒体组内容，请稍候..."
+                if state.is_processing_media_group or state.pending_media_groups:
+                    text = "⏳ 媒体组已加入队列，请稍候..."
+
+                try:
+                    status_message = message.reply_text(
+                        text,
+                        reply_to_message_id=message.message_id
+                    )
+                except Exception as e:
+                    logger.warning(f"回复消息失败: {e}")
+                    status_message = message.reply_text(text)
+
+            status_message_id = status_message.message_id if status_message else None
+            state.active_collections[collection_key] = {
+                'chat_id': chat_id,
+                'user_id': user.id,
+                'user_name': user.username or user.first_name,
+                'media_group_id': media_group_id,
+                'media_items': [media_info],
+                'first_time': datetime.now().isoformat(),
+                'status_message_id': status_message_id,
+                'source': source,
+                'source_id': source_id,
+                'source_link': source_link,
+                'source_type': source_type,
+                'chat_type': chat_type or (message.chat.type if message else None),
+                'caption': message.caption if message else None
+            }
+            logger.info(f"开始收集媒体组 {media_group_id}，消息ID: {status_message_id}")
+            save_media_groups_collection()
+        else:
+            state.active_collections[collection_key]['media_items'].append(media_info)
+            if not state.active_collections[collection_key].get('caption') and message and message.caption:
+                state.active_collections[collection_key]['caption'] = message.caption
+            logger.debug(f"媒体组 {media_group_id} 添加了{media_type}，总数: {len(state.active_collections[collection_key]['media_items'])}")
+
+        return len(state.active_collections[collection_key]['media_items']), is_first_media
+
+
+def schedule_media_group_processing(context, media_group_id, chat_id):
+    """安排媒体组处理任务"""
+    collection_key = f"{chat_id}_{media_group_id}"
+
+    with state.media_group_lock:
+        state.pending_media_groups.append(collection_key)
+        logger.debug(f"媒体组 {media_group_id} 已添加到处理队列，当前队列长度: {len(state.pending_media_groups)}")
+
+    context.job_queue.run_once(
+        process_next_media_group,
+        state.MEDIA_GROUP_COLLECT_TIME,
+        context={'initial_key': collection_key}
+    )
+    logger.debug(f"已安排媒体组 {media_group_id} 的处理任务")
+
+
+def process_next_media_group(context):
+    """处理队列中的下一个媒体组"""
+    with state.media_group_lock:
+        if not state.pending_media_groups:
+            state.is_processing_media_group = False
+            logger.debug("没有待处理的媒体组")
+            return
+
+        if state.is_processing_media_group:
+            return
+
+        collection_key = state.pending_media_groups.popleft()
+        state.is_processing_media_group = True
+
+    try:
+        process_media_group_photos(context, collection_key)
+    except Exception as e:
+        logger.error(f"处理媒体组 {collection_key} 出错: {e}")
+    finally:
+        with state.media_group_lock:
+            state.is_processing_media_group = False
+            if state.pending_media_groups:
+                context.job_queue.run_once(
+                    process_next_media_group,
+                    0.5,
+                    context={}
+                )
+
+
+def process_media_group_photos(context, collection_key=None, is_retry=False, retry_type=None):
+    """处理媒体组内容 (并发下载优化版)"""
+    if collection_key is None:
+        collection_key = context.job.context.get('initial_key')
+
+    with state.media_group_lock:
+        group_info = state.active_collections.get(collection_key)
+        if not group_info and is_retry:
+            group_info = state.processed_groups_history.get(collection_key)
+
+        if not group_info:
+            logger.error(f"媒体组收集 {collection_key} 不存在")
+            return
+
+    chat_id = group_info['chat_id']
+    media_group_id = group_info['media_group_id']
+    user_name = group_info['user_name']
+    media_items = group_info['media_items']
+    status_message_id = group_info.get('status_message_id')
+    total_items = len(media_items)
+    if total_items == 0:
+        if status_message_id:
+            try:
+                context.bot.edit_message_text(chat_id=chat_id, message_id=status_message_id, text="❌ 未能处理任何媒体内容")
+            except Exception:
+                pass
+        with state.media_group_lock:
+            if collection_key in state.active_collections:
+                del state.active_collections[collection_key]
+                save_media_groups_collection()
+        return
+
+    # 在开始处理前，清理该媒体组可能残留的内存查重标记
+    with state.saving_lock:
+        for item in media_items:
+            fid = item.get('file_unique_id')
+            if fid in state.saving_unique_ids:
+                state.saving_unique_ids.remove(fid)
+
+    # 重载逻辑处理
+    if is_retry:
+        if retry_type == "all":
+            all_ids = [item['file_unique_id'] for item in media_items]
+            if all_ids:
+                logger.info(f"媒体组 {collection_key} 开始强制重下：正在清理 {len(all_ids)} 条记录...")
+                delete_media_records(all_ids)
+            for item in media_items:
+                item['status'] = 0
+
+        elif retry_type == "this":
+            to_delete = [item['file_unique_id'] for item in media_items if item.get('status') == 1]
+            if to_delete:
+                logger.info(f"媒体组 {collection_key} 重新下载本次：正在清理 {len(to_delete)} 条新记录...")
+                delete_media_records(to_delete)
+            for item in media_items:
+                item['status'] = 0
+
+        elif retry_type == "failed":
+            for item in media_items:
+                if item.get('status') == 3:
+                    item['status'] = 0
+
+    if status_message_id:
+        try:
+            context.bot.edit_message_text(chat_id=chat_id, message_id=status_message_id, text=f"⏳ 正在并发保存媒体组：0/{total_items}")
+        except Exception:
+            pass
+
+    # 准备目录
+    user_id = group_info.get('user_id')
+    user_obj = type('User', (), {'id': user_id, 'username': user_name, 'first_name': user_name})
+    source = group_info.get('source')
+    source_type = group_info.get('source_type')
+    save_dir = get_save_directory(user_obj, source, source_type)
+
+    start_time = time.time()
+    progress_lock = threading.Lock()
+    caption = group_info.get('caption')
+    skipped_duplicates = []
+
+    # 状态：0-等待中(⏳), 1-成功(✅), 2-重复(♻️), 3-失败(❌), 4-下载中(⬇️)
+    items_status = [item.get('status', 0) for item in media_items]
+    item_progress = [0] * total_items  # 记录每个项的下载进度(0-99)
+
+    base_timestamp = group_info.get('base_timestamp')
+    if not base_timestamp:
+        base_timestamp = generate_temp_filename(media_group_id)
+        group_info['base_timestamp'] = base_timestamp
+
+    last_ui_update = {"time": 0}
+    is_finished = {"value": False}
+
+    processed_count = {"value": sum(1 for s in items_status if s in [1, 2])}
+
+    def get_progress_bar():
+        status_map = {0: "⏳", 1: "✅", 2: "♻️", 3: "❌", 4: "⬇️"}
+        res = []
+        for i, s in enumerate(items_status):
+            if s == 4:
+                res.append(f"⬇️{item_progress[i]}%")
+            else:
+                res.append(status_map.get(s, "❓"))
+        return "".join(res)
+
+    def update_ui_async():
+        """非阻塞地更新机器人状态消息"""
+        if is_finished["value"]:
+            return
+
+        curr_time = time.time()
+        if curr_time - last_ui_update["time"] > 1.2:
+            last_ui_update["time"] = curr_time
+
+            def _do_update():
+                try:
+                    button_list = [
+                        [
+                            InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
+                            InlineKeyboardButton("🔥 强制重下全部", callback_data=f"mg_retry_all:{collection_key}")
+                        ],
+                        [
+                            InlineKeyboardButton("🔄 刷新状态", callback_data=f"mg_refresh:{collection_key}"),
+                            InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")
+                        ]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(button_list)
+                    context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=status_message_id,
+                        text=f"正在保存媒体组...\n进度: {get_progress_bar()} ({processed_count['value']}/{total_items})",
+                        reply_markup=reply_markup
+                    )
+                except Exception:
+                    pass
+            threading.Thread(target=_do_update, daemon=True).start()
+
+    def download_and_save_task(index, media_info):
+        is_internally_saving = False
+        file_unique_id = media_info['file_unique_id']
+        try:
+            if items_status[index - 1] in [1, 2]:
+                return True
+
+            dup_info = get_duplicate_info(file_unique_id)
+
+            with state.saving_lock:
+                if file_unique_id in state.saving_unique_ids:
+                    is_internally_saving = True
+                else:
+                    state.saving_unique_ids.add(file_unique_id)
+
+            if dup_info or is_internally_saving:
+                with progress_lock:
+                    fname = dup_info['filename'] if dup_info else "当前组内重复项"
+                    src = dup_info['source'] if dup_info else "本消息"
+                    skipped_duplicates.append({
+                        'index': index,
+                        'filename': fname,
+                        'source': src,
+                        'source_link': dup_info.get('source_link') if dup_info else "",
+                        'caption': (dup_info.get('caption') if dup_info else '无') or '无'
+                    })
+                    items_status[index - 1] = 2
+                    media_info['status'] = 2
+                    processed_count['value'] += 1
+                update_ui_async()
+                return True
+        except Exception as e:
+            logger.error(f"查重逻辑检查出错: {e}")
+
+        try:
+            file_size = media_info.get('file_size', 0)
+
+            if USER_API_ENABLED and file_size >= 20 * 1024 * 1024:
+                ext = ".mp4" if media_info.get('media_type') == 'video' else ".jpg"
+                final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
+                final_path = os.path.join(save_dir, final_filename)
+
+                logger.info(f"文件较大 ({file_size/1024/1024:.1f}MB)，切换至 User API 下载: {index}")
+
+                with progress_lock:
+                    items_status[index - 1] = 4
+                    item_progress[index - 1] = 0
+
+                def p_callback(current, total):
+                    if total > 0:
+                        percent = int(current * 100 / total)
+                        if percent != item_progress[index - 1]:
+                            with progress_lock:
+                                item_progress[index - 1] = percent
+                            update_ui_async()
+                    else:
+                        update_ui_async()
+
+                orig_chat_id = media_info.get('orig_chat_id')
+                orig_msg_id = media_info.get('orig_msg_id')
+
+                target_chat_id = orig_chat_id or chat_id
+                target_msg_id = orig_msg_id or media_info['message_id']
+
+                if not orig_chat_id:
+                    chat_type = group_info.get('chat_type')
+                    if chat_type == 'private' or source_type in ["user", "private_user"]:
+                        target_chat_id = context.bot.username or context.bot.id
+
+                logger.debug(f"媒体项 {index} User API 开始任务")
+                u_start = time.time()
+                success = user_api.run_download_large_file(
+                    target_chat_id,
+                    target_msg_id,
+                    final_path,
+                    progress_callback=p_callback,
+                    file_unique_id=media_info['file_unique_id']
+                )
+
+                if not success and target_chat_id != chat_id:
+                    logger.warning(f"媒体项 {index} 溯源下载失败，尝试从本地聊天回退下载...")
+                    fallback_chat_id = chat_id
+                    chat_type = group_info.get('chat_type')
+                    if chat_type == 'private' or source_type in ["user", "private_user"]:
+                        fallback_chat_id = context.bot.username or context.bot.id
+
+                    success = user_api.run_download_large_file(
+                        fallback_chat_id,
+                        media_info['message_id'],
+                        final_path,
+                        progress_callback=p_callback,
+                        file_unique_id=media_info['file_unique_id']
+                    )
+                u_end = time.time()
+                logger.debug(f"媒体项 {index} User API 任务结束, 用时: {u_end - u_start:.1f}秒")
+
+                if success:
+                    media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': media_info['file_unique_id']})
+                    save_to_db(user_obj, media_obj_stub, final_filename,
+                               save_dir=save_dir,
+                               media_group_id=media_group_id,
+                               media_type=media_info.get('media_type', 'photo'),
+                               caption=caption,
+                               source=source,
+                               source_id=group_info.get('source_id'),
+                               source_link=group_info.get('source_link'),
+                               source_type=source_type)
+
+                    with progress_lock:
+                        items_status[index - 1] = 1
+                        media_info['status'] = 1
+                        processed_count['value'] += 1
+                    update_ui_async()
+                    return True
+                else:
+                    raise Exception("User API 下载失败")
+
+            file = context.bot.get_file(media_info['file_id'])
+            temp_path = os.path.join(save_dir, f"{base_timestamp}_temp_{index}")
+
+            download_with_retry(file, temp_path)
+
+            media_type = media_info.get('media_type', 'photo')
+            ext = get_video_extension(temp_path) if media_type == 'video' else get_image_extension(temp_path)
+
+            final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
+            final_path = os.path.join(save_dir, final_filename)
+            os.rename(temp_path, final_path)
+
+            media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': media_info['file_unique_id']})
+            db_success = save_to_db(user_obj, media_obj_stub, final_filename,
+                                    save_dir=save_dir,
+                                    media_group_id=media_group_id,
+                                    media_type=media_type,
+                                    caption=caption,
+                                    source=source,
+                                    source_id=group_info.get('source_id'),
+                                    source_link=group_info.get('source_link'),
+                                    source_type=source_type)
+
+            if not db_success:
+                raise Exception("元数据保存数据库失败 (可能数据库被锁定)")
+
+            with progress_lock:
+                items_status[index - 1] = 1
+                media_info['status'] = 1
+                processed_count['value'] += 1
+            update_ui_async()
+            return True
+        except Exception as e:
+            logger.error(f"媒体项 {index} 下载失败: {e}")
+            with progress_lock:
+                items_status[index - 1] = 3
+                media_info['status'] = 3
+                processed_count['value'] += 1
+            update_ui_async()
+            return False
+        finally:
+            with state.saving_lock:
+                if not is_internally_saving and file_unique_id in state.saving_unique_ids:
+                    state.saving_unique_ids.remove(file_unique_id)
+
+    futures = [state.download_executor.submit(download_and_save_task, i, item) for i, item in enumerate(media_items, 1)]
+    results = [f.result() for f in futures]
+
+    elapsed_time = time.time() - start_time
+    is_finished["value"] = True
+
+    if status_message_id:
+        try:
+            has_failed = any(s == 3 for s in items_status)
+            success_count = sum(1 for s in items_status if s == 1)
+            dup_count = sum(1 for s in items_status if s == 2)
+            total_success = success_count + dup_count
+
+            finish_text = f"✅ 媒体组保存完成！({total_success}/{total_items}个项，用时{elapsed_time:.1f}秒)\n"
+            finish_text += f"结果: {get_progress_bar()}\n"
+
+            if skipped_duplicates:
+                skipped_duplicates.sort(key=lambda x: x['index'])
+                finish_text += f"♻️ 跳过了 {len(skipped_duplicates)} 个重复资源:\n"
+                for dup in skipped_duplicates:
+                    source_display = dup['source']
+                    if dup.get('source_link'):
+                        source_display = f"[{dup['source']}]({dup['source_link']})"
+                    finish_text += f" - 第{dup['index']}项 -> `{dup['filename']}` (来源: {source_display}，原标题: {dup['caption']})\n"
+
+            if has_failed:
+                finish_text += f"\n⚠️ 有部分项下载失败，您可以点击下方按钮重试。"
+
+            keyboard = []
+            keyboard.append([
+                InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
+                InlineKeyboardButton("🔥 强制重下全部", callback_data=f"mg_retry_all:{collection_key}")
+            ])
+
+            row2 = [InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")]
+            if has_failed:
+                row2.insert(0, InlineKeyboardButton("❌ 重试失败项", callback_data=f"mg_retry_failed:{collection_key}"))
+            keyboard.append(row2)
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_message_id,
+                text=finish_text,
+                parse_mode='Markdown',
+                disable_web_page_preview=True,
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"更新最终状态消息失败: {e}")
+
+    # 清理内存中的收集状态并移动到历史记录
+    with state.media_group_lock:
+        if collection_key in state.active_collections:
+            state.processed_groups_history[collection_key] = state.active_collections[collection_key]
+            if len(state.processed_groups_history) > 100:
+                oldest_key = next(iter(state.processed_groups_history))
+                del state.processed_groups_history[oldest_key]
+
+            del state.active_collections[collection_key]
+            save_media_groups_collection()

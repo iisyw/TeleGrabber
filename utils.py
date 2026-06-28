@@ -4,7 +4,6 @@
 import os
 import time
 import csv
-import hashlib
 import imghdr
 from datetime import datetime
 import logging
@@ -44,18 +43,6 @@ def get_save_directory(user, source=None, source_type=None):
         os.makedirs(source_dir, exist_ok=True)
     
     return source_dir
-
-def get_short_id(media_group_id):
-    """从媒体组ID获取标识符
-    
-    Args:
-        media_group_id: Telegram媒体组ID
-        
-    Returns:
-        str: 用于文件名的标识符
-    """
-    # 使用完整的媒体组ID，或者对于单张图片使用"single"
-    return media_group_id if media_group_id else "single"
 
 def get_video_extension(file_path):
     """检测视频文件的实际格式并返回正确的扩展名
@@ -139,22 +126,6 @@ def generate_temp_filename(media_group_id=None):
     if media_group_id:
         return str(timestamp)
     return f"single_{timestamp}"
-
-def generate_filename(photo_obj, media_group_id=None):
-    """根据图片对象生成简洁的唯一文件名
-    
-    Args:
-        photo_obj: Telegram照片对象
-        media_group_id: 可选的媒体组ID
-        
-    Returns:
-        str: 生成的文件名
-    """
-    # 使用精确到毫秒的纯数字时间戳
-    timestamp = int(time.time() * 1000)  # 毫秒级时间戳，例如：1686834561723
-    
-    short_id = get_short_id(media_group_id)
-    return f"{short_id}_{timestamp}.jpg"
 
 DB_PATH = os.path.join(DATA_DIR, "telegrabber.db")
 
@@ -353,85 +324,76 @@ def delete_media_by_id(record_ids):
     """根据数据库自增 ID 列表删除媒体记录和对应的物理文件"""
     if not record_ids:
         return 0
-        
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
+
     deleted_count = 0
-    # 用于按目录批量更新 CSV
-    dir_files_map = {} # {save_dir: [filenames]}
-    
+    dir_files_map = {}  # {save_dir: [filenames]}
+
     try:
         with _db_lock:
-            # 重新获取连接或使用当前游标
-            for rid in record_ids:
-                # 获取文件名和路径以进行物理删除
-                cursor.execute("SELECT filename, source, source_type, user_id, user_name FROM media_metadata WHERE id = ?", (rid,))
-                row = cursor.fetchone()
-                if row:
-                    filename, source, source_type, user_id, user_name = row
+            conn = get_db_connection()
+            try:
+                cursor = conn.cursor()
+                placeholders = ",".join("?" * len(record_ids))
+
+                # 1. 一次性查出所有待删除记录的信息（避免 N+1 查询）
+                cursor.execute(
+                    f"SELECT id, filename, source, source_type, user_id, user_name "
+                    f"FROM media_metadata WHERE id IN ({placeholders})",
+                    tuple(record_ids),
+                )
+                rows = cursor.fetchall()
+
+                for _id, filename, source, source_type, user_id, user_name in rows:
                     # 构建虚拟用户对象以获取目录
                     user_stub = type('User', (), {'id': user_id, 'username': user_name, 'first_name': user_name})
                     save_dir = get_save_directory(user_stub, source, source_type)
                     file_path = os.path.join(save_dir, filename)
-                    
-                    # 记录待删除的 CSV 映射
-                    if save_dir not in dir_files_map:
-                        dir_files_map[save_dir] = []
-                    dir_files_map[save_dir].append(filename)
-                    
-                    # 1. 物理删除文件
+
+                    dir_files_map.setdefault(save_dir, []).append(filename)
+
+                    # 物理删除文件
                     if os.path.exists(file_path):
                         try:
                             os.remove(file_path)
                             logger.info(f"已物理删除文件: {file_path}")
                         except Exception as e:
                             logger.error(f"物理删除文件失败 {file_path}: {e}")
-                    
-                    # 2. 从数据库删除记录
-                    cursor.execute("DELETE FROM media_metadata WHERE id = ?", (rid,))
-                    deleted_count += 1
-                    
-            conn.commit()
-        
+
+                # 2. 一次性从数据库删除所有记录
+                cursor.execute(
+                    f"DELETE FROM media_metadata WHERE id IN ({placeholders})",
+                    tuple(record_ids),
+                )
+                deleted_count = cursor.rowcount
+                conn.commit()
+            finally:
+                conn.close()
+
         # 3. 更新 CSV 备份
         for save_dir, filenames in dir_files_map.items():
             delete_csv_records(save_dir, filenames)
-            
+
     except Exception as e:
         logger.error(f"按 ID 批量删除媒体记录失败: {e}")
-    finally:
-        try: conn.close()
-        except: pass
-        
+
     return deleted_count
 
 def delete_media_records(file_unique_ids):
     """根据 unique_id 列表删除媒体记录和对应的物理文件 (向下兼容)"""
     if not file_unique_ids:
         return 0
-        
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    ids = []
-    try:
-        for fut in file_unique_ids:
-            cursor.execute("SELECT id FROM media_metadata WHERE file_unique_id = ?", (fut,))
-            row = cursor.fetchone()
-            if row:
-                ids.append(row[0])
-    finally:
-        conn.close()
-        
-    return delete_media_by_id(ids)
 
-def get_mime_type(document):
-    """获取文档的MIME类型
-    
-    Args:
-        document: Telegram文档对象
-        
-    Returns:
-        str: MIME类型
-    """
-    return document.mime_type 
+    with _db_lock:
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(file_unique_ids))
+            cursor.execute(
+                f"SELECT id FROM media_metadata WHERE file_unique_id IN ({placeholders})",
+                tuple(file_unique_ids),
+            )
+            ids = [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    return delete_media_by_id(ids)

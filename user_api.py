@@ -84,7 +84,7 @@ def get_pyrogram_client():
                     time.sleep(0.3)
                 
                 future = asyncio.run_coroutine_threadsafe(_init_client_task(), _loop)
-                _app = future.result() 
+                _app = future.result(timeout=180)  # 首次登录可能较慢，但避免永久阻塞
     return _app
 
 async def _reset_client():
@@ -281,7 +281,8 @@ def run_download_large_file(chat_id, message_id, final_path, progress_callback=N
         _loop
     )
     try:
-        return future.result()
+        # 大文件下载允许较长时间，但设置上限以防永久挂死 (默认 1 小时)
+        return future.result(timeout=3600)
     except Exception as e:
         logger.error(f"User API 任务执行抛出异常: {e}", exc_info=True)
         return False

@@ -12,6 +12,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def mask_proxy_url(url):
+    """隐藏代理 URL 中的用户名/密码，避免明文写入日志"""
+    if not url:
+        return url
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.password or parsed.username:
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            return f"{parsed.scheme}://***:***@{netloc}"
+        return url
+    except Exception:
+        return "***"
+
 # 降低APScheduler的日志级别，减少输出
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 # 针对 Pyrogram 内部一些会自动记录但我们已经通过重试机制处理的错误，降低其日志级别
@@ -38,6 +54,10 @@ PROXY = os.getenv('PROXY_URL')  # 可选的代理设置
 TIMEOUT = int(os.getenv('CONNECTION_TIMEOUT', '30'))  # 连接超时设置，默认30秒
 DOWNLOAD_RETRIES = int(os.getenv('DOWNLOAD_RETRIES', '3'))  # 下载失败重试次数，默认3次
 WEB_PORT = int(os.getenv('WEB_PORT', '5000'))  # Web 管理后台端口，默认 5000
+
+# Web 管理后台登录凭据 (HTTP Basic Auth)
+WEB_USERNAME = os.getenv('WEB_USERNAME', 'admin')
+WEB_PASSWORD = os.getenv('WEB_PASSWORD', '')
 
 # 允许使用机器人的用户列表
 # 格式为逗号分隔的用户名或用户ID列表，例如: user1,user2,123456789
@@ -76,6 +96,6 @@ def get_connection_args():
     # 如果设置了代理，就使用代理
     if PROXY:
         connection_args['proxy_url'] = PROXY
-        logger.info(f"使用代理: {PROXY}")
+        logger.info(f"使用代理: {mask_proxy_url(PROXY)}")
     
     return connection_args 

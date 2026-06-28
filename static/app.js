@@ -1,3 +1,91 @@
+// 已登录凭据 (Basic Auth)，仅保存在内存中，刷新页面后需重新输入
+let authHeader = null;
+
+// HTML 转义，防止 caption/filename 等用户可控字段造成 XSS
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// 构造带鉴权头的请求选项
+function authFetch(url, options = {}) {
+    const opts = { ...options };
+    if (authHeader) {
+        opts.headers = { ...(opts.headers || {}), 'Authorization': authHeader };
+    }
+    return fetch(url, opts);
+}
+
+// 轻量提示 toast
+function showToast(message, type = 'success', duration = 2500) {
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.classList.add('fade-out');
+        toast.addEventListener('animationend', () => toast.remove());
+    }, duration);
+}
+
+// 自定义确认对话框，返回 Promise<boolean>
+function confirmDialog(message, { title = '确认操作', okText = '确认删除' } = {}) {
+    return new Promise(resolve => {
+        const overlay = document.getElementById('confirmDialog');
+        const okBtn = document.getElementById('confirmOk');
+        const cancelBtn = document.getElementById('confirmCancel');
+        document.getElementById('confirmTitle').textContent = title;
+        document.getElementById('confirmMessage').textContent = message;
+        okBtn.textContent = okText;
+
+        const cleanup = (result) => {
+            overlay.classList.remove('show');
+            okBtn.onclick = null;
+            cancelBtn.onclick = null;
+            document.removeEventListener('keydown', onKey);
+            overlay.removeEventListener('click', onBackdrop);
+            resolve(result);
+        };
+        const onKey = (e) => {
+            if (e.key === 'Escape') cleanup(false);
+            else if (e.key === 'Enter') cleanup(true);
+        };
+        const onBackdrop = (e) => { if (e.target === overlay) cleanup(false); };
+
+        okBtn.onclick = () => cleanup(true);
+        cancelBtn.onclick = () => cleanup(false);
+        document.addEventListener('keydown', onKey);
+        overlay.addEventListener('click', onBackdrop);
+        overlay.classList.add('show');
+    });
+}
+
+// 弹出登录框并执行写操作；遇到 401 时提示重新输入
+async function authedWrite(url, options) {
+    let response = await authFetch(url, options);
+    if (response.status === 401) {
+        const username = prompt('请输入管理后台用户名:');
+        if (username === null) return null;
+        const password = prompt('请输入密码:');
+        if (password === null) return null;
+        authHeader = 'Basic ' + btoa(`${username}:${password}`);
+        response = await authFetch(url, options);
+        if (response.status === 401) {
+            authHeader = null;
+            showToast('用户名或密码错误', 'error');
+            return null;
+        }
+    }
+    return response;
+}
+
 let currentSearch = '';
 let currentSource = '';
 let currentGroup = '';
@@ -55,6 +143,7 @@ function resetAndLoad() {
 async function loadStats() {
     try {
         const response = await fetch('/api/stats');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         totalCountEl.textContent = `总量: ${data.total_count}`;
     } catch (err) {
@@ -67,8 +156,8 @@ async function loadStats() {
 async function loadSources() {
     try {
         const response = await fetch('/api/sources');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const sources = await response.json();
-        // const firstTwo = sourceFilter.innerHTML; // 保持前两项（全部、单张） - 这一行在原始代码中不存在，且与后续逻辑冲突，移除
         sourceFilter.innerHTML = '<option value="">所有来源渠道</option>';
         sources.forEach(source => {
             const option = document.createElement('option');
@@ -89,6 +178,7 @@ async function loadGroups() {
 
     try {
         const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const groups = await response.json();
         groups.forEach(groupId => {
             const option = document.createElement('option');
@@ -115,6 +205,7 @@ async function loadMoreMedia() {
 
     try {
         const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const newData = await response.json();
         
         if (newData.length < limit) {
@@ -127,7 +218,7 @@ async function loadMoreMedia() {
     } catch (err) {
         console.error('加载失败:', err);
         if (offset === 0) {
-            mediaContainer.innerHTML = `<div class="error">加载失败: ${err.message}</div>`;
+            mediaContainer.innerHTML = `<div class="error">加载失败: ${escapeHtml(err.message)}</div>`;
         }
     } finally {
         isLoading = false;
@@ -153,15 +244,14 @@ function renderGroupedGallery(newData, isFirstPage) {
 
     newData.forEach(item => {
         const gid = item.media_group_id && item.media_group_id !== 'single' ? item.media_group_id : 'single';
-        
-        // 查找或创建 Group Section
-        let sectionId = `group-${gid}`;
-        let section = document.getElementById(sectionId);
-        
+
+        // 查找或创建 Group Section（用 dataset 而非 id 选择器，避免 gid 含特殊字符）
+        let section = mediaContainer.querySelector(`section.group-section[data-gid="${CSS.escape(gid)}"]`);
+
         if (!section) {
             section = document.createElement('section');
-            section.id = sectionId;
             section.className = 'group-section';
+            section.dataset.gid = gid;
             
             // 组标题处理
             let groupTitle = gid === 'single' ? '单张内容 / 其他' : `媒体组: ${gid}`;
@@ -179,12 +269,22 @@ function renderGroupedGallery(newData, isFirstPage) {
 
             const header = document.createElement('div');
             header.className = 'group-header';
-            
-            let actionsHtml = gid !== 'single' 
-                ? `<div class="group-actions"><button class="danger-btn btn-delete-group" onclick="deleteGroup('${gid}')">🗑️ 删除整组</button></div>` 
-                : '';
-            
-            header.innerHTML = `<h2 title="${fullCaption}">${groupTitle}</h2>${actionsHtml}`;
+
+            const h2 = document.createElement('h2');
+            h2.title = fullCaption;
+            h2.textContent = groupTitle;
+            header.appendChild(h2);
+
+            if (gid !== 'single') {
+                const actions = document.createElement('div');
+                actions.className = 'group-actions';
+                const delBtn = document.createElement('button');
+                delBtn.className = 'danger-btn btn-delete-group';
+                delBtn.textContent = '🗑️ 删除整组';
+                delBtn.onclick = () => deleteGroup(gid);
+                actions.appendChild(delBtn);
+                header.appendChild(actions);
+            }
             section.appendChild(header);
             
             const grid = document.createElement('div');
@@ -203,19 +303,28 @@ function renderGroupedGallery(newData, isFirstPage) {
 
 // 删除整个媒体组
 async function deleteGroup(groupId) {
-    if (!confirm(`确定要彻底删除整个媒体组 ${groupId} 吗？\n此操作将删除该组下的所有文件及记录，不可恢复。`)) return;
+    const ok = await confirmDialog(
+        `确定要彻底删除整个媒体组吗？\n此操作将删除该组下的所有文件及记录，不可恢复。`,
+        { title: '删除媒体组', okText: '删除整组' }
+    );
+    if (!ok) return;
 
     try {
-        const response = await fetch(`/api/media_group/${groupId}`, { method: 'DELETE' });
+        const response = await authedWrite(`/api/media_group/${groupId}`, { method: 'DELETE' });
+        if (!response) return;
         if (response.ok) {
-            resetAndLoad();
+            // 局部移除整个分组，不刷新页面、不重置滚动
+            const section = mediaContainer.querySelector(`section.group-section[data-gid="${CSS.escape(groupId)}"]`);
+            if (section) section.remove();
+            mediaList = mediaList.filter(m => m.media_group_id !== groupId);
             loadStats();
+            showToast('媒体组已删除', 'success');
         } else {
-            const error = await response.json();
-            alert('删除失败: ' + (error.detail || '未知原因'));
+            const error = await response.json().catch(() => ({}));
+            showToast('删除失败: ' + (error.detail || '未知原因'), 'error');
         }
     } catch (err) {
-        alert('系统错误: ' + err.message);
+        showToast('系统错误: ' + err.message, 'error');
     }
 }
 
@@ -223,6 +332,7 @@ async function deleteGroup(groupId) {
 function createMediaCard(item) {
     const card = document.createElement('div');
     card.className = 'media-card';
+    card.dataset.id = item.id;
     
     const isVideo = item.media_type === 'video';
     let relativePath = '';
@@ -233,18 +343,20 @@ function createMediaCard(item) {
     } else {
         relativePath = `${item.source}/${item.filename}`;
     }
-    const mediaUrl = `/media/${relativePath}`;
+    // 对每一段路径做 URI 编码，避免特殊字符破坏 URL
+    const mediaUrl = '/media/' + relativePath.split('/').map(encodeURIComponent).join('/');
 
-    let previewHtml = isVideo 
-        ? `<video class="media-preview" muted preload="metadata"><source src="${mediaUrl}" type="video/mp4"></video>` 
+    const previewHtml = isVideo
+        ? `<video class="media-preview" muted preload="metadata"><source src="${mediaUrl}" type="video/mp4"></video>`
         : `<img class="media-preview" src="${mediaUrl}" loading="lazy">`;
 
+    const dateText = item.datetime ? item.datetime.split('T')[0] : '';
     card.innerHTML = `
         ${previewHtml}
         <div class="type-badge">${isVideo ? '🎥 视频' : '🖼️ 图片'}</div>
         <div class="card-overlay">
-            <div class="card-caption">${item.caption || '无标题'}</div>
-            <div class="card-meta">${item.datetime.split('T')[0]}</div>
+            <div class="card-caption">${escapeHtml(item.caption || '无标题')}</div>
+            <div class="card-meta">${escapeHtml(dateText)}</div>
         </div>
     `;
 
@@ -262,17 +374,38 @@ function openModal(item, url) {
     }
     
     modalCaption.textContent = item.caption || '无标题';
-    
+
     const sourceText = item.source || '未知';
-    const sourceLinkHtml = item.source_link 
-        ? `<a href="${item.source_link}" target="_blank" style="color: var(--accent-color); font-weight: bold; margin-left:10px;">(去原消息 🔗)</a>` 
-        : '';
-    
-    modalMeta.innerHTML = `
-        <div class="meta-item"><strong>文件名:</strong> ${item.filename}</div>
-        <div class="meta-item"><strong>来源:</strong> ${sourceText}${sourceLinkHtml}</div>
-        <div class="meta-item"><strong>时间:</strong> ${item.datetime.replace('T', ' ').split('.')[0]}</div>
-    `;
+    const datetimeText = item.datetime ? item.datetime.replace('T', ' ').split('.')[0] : '';
+
+    // 用 DOM API 构造，避免 filename/source/source_link 引发 XSS
+    modalMeta.innerHTML = '';
+
+    const fileRow = document.createElement('div');
+    fileRow.className = 'meta-item';
+    fileRow.innerHTML = '<strong>文件名:</strong> ';
+    fileRow.appendChild(document.createTextNode(item.filename || ''));
+
+    const sourceRow = document.createElement('div');
+    sourceRow.className = 'meta-item';
+    sourceRow.innerHTML = '<strong>来源:</strong> ';
+    sourceRow.appendChild(document.createTextNode(sourceText));
+    if (item.source_link) {
+        const link = document.createElement('a');
+        link.href = item.source_link;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.style.cssText = 'color: var(--accent-color); font-weight: bold; margin-left:10px;';
+        link.textContent = '(去原消息 🔗)';
+        sourceRow.appendChild(link);
+    }
+
+    const timeRow = document.createElement('div');
+    timeRow.className = 'meta-item';
+    timeRow.innerHTML = '<strong>时间:</strong> ';
+    timeRow.appendChild(document.createTextNode(datetimeText));
+
+    modalMeta.append(fileRow, sourceRow, timeRow);
     modal.style.display = 'block';
 }
 
@@ -336,21 +469,41 @@ function setupEventListeners() {
     searchInput.onkeypress = (e) => { if (e.key === 'Enter') { currentSearch = searchInput.value; resetAndLoad(); } };
 
     modalDeleteBtn.onclick = async () => {
-        if (!confirm('确定要删除这个资源吗？此操作将同时删除本地文件和数据库记录。')) return;
+        const ok = await confirmDialog(
+            '确定要删除这个资源吗？此操作将同时删除本地文件和数据库记录。',
+            { title: '删除资源', okText: '彻底删除' }
+        );
+        if (!ok) return;
+        const targetId = currentMediaId;
         try {
-            const response = await fetch(`/api/media/${currentMediaId}`, { method: 'DELETE' });
+            const response = await authedWrite(`/api/media/${targetId}`, { method: 'DELETE' });
+            if (!response) return;
             if (response.ok) {
                 modal.style.display = 'none';
                 stopMedia();
-                resetAndLoad();
+                removeCardFromDom(targetId);
                 loadStats();
+                showToast('已删除', 'success');
             } else {
-                alert('删除失败');
+                const error = await response.json().catch(() => ({}));
+                showToast('删除失败: ' + (error.detail || '未知原因'), 'error');
             }
         } catch (err) {
-            alert('系统错误: ' + err.message);
+            showToast('系统错误: ' + err.message, 'error');
         }
     };
+}
+
+// 从 DOM 中局部移除一张卡片；若所在分组随之变空，则连同分组一起移除
+function removeCardFromDom(id) {
+    const card = mediaContainer.querySelector(`.media-card[data-id="${CSS.escape(String(id))}"]`);
+    if (!card) return;
+    const section = card.closest('.group-section');
+    card.remove();
+    mediaList = mediaList.filter(m => String(m.id) !== String(id));
+    if (section && section.querySelectorAll('.media-card').length === 0) {
+        section.remove();
+    }
 }
 
 init();
