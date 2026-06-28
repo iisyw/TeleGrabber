@@ -4,7 +4,6 @@
 import os
 import time
 import csv
-import imghdr
 from datetime import datetime
 import logging
 import mimetypes
@@ -89,27 +88,40 @@ def get_video_extension(file_path):
 
 def get_image_extension(file_path):
     """检测图片文件的实际格式并返回正确的扩展名
-    
+
+    Python 3.13 移除了标准库 imghdr，这里改用文件头魔数 (magic bytes) 自行判断。
+
     Args:
         file_path: 图片文件路径
-        
+
     Returns:
         str: 正确的文件扩展名（带点，如.jpg）
     """
-    # 使用imghdr检测图片类型
-    img_type = imghdr.what(file_path)
-    
-    # 确保获取到了类型
-    if img_type:
-        # 特殊处理jpeg (imghdr返回'jpeg'但扩展名通常为'jpg')
-        if img_type == 'jpeg':
-            return '.jpg'
-        # webp不在imghdr的默认检测中，需要单独处理
-        elif img_type == 'webp':
-            return '.webp'
-        return f'.{img_type}'
-    
-    # 如果无法检测，返回默认.jpg
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(32)
+    except Exception as e:
+        logger.error(f"读取图片文件头失败: {e}")
+        return '.jpg'
+
+    # 按文件头魔数判断常见图片格式
+    if header.startswith(b'\xff\xd8\xff'):
+        return '.jpg'
+    if header.startswith(b'\x89PNG\r\n\x1a\n'):
+        return '.png'
+    if header.startswith(b'GIF87a') or header.startswith(b'GIF89a'):
+        return '.gif'
+    if header.startswith(b'BM'):
+        return '.bmp'
+    if header[:4] == b'RIFF' and header[8:12] == b'WEBP':
+        return '.webp'
+    # TIFF (大端/小端)
+    if header.startswith(b'II*\x00') or header.startswith(b'MM\x00*'):
+        return '.tiff'
+    # HEIC/HEIF: ftyp box，brand 含 heic/heif/mif1
+    if header[4:8] == b'ftyp' and header[8:12] in (b'heic', b'heix', b'hevc', b'mif1', b'heif'):
+        return '.heic'
+
     logger.warning(f"无法检测图片类型: {file_path}, 使用默认.jpg扩展名")
     return '.jpg'
 
