@@ -32,6 +32,8 @@ def mask_proxy_url(url):
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 # 针对 Pyrogram 内部一些会自动记录但我们已经通过重试机制处理的错误，降低其日志级别
 logging.getLogger('pyrogram').setLevel(logging.WARNING)
+# 压制 httpx 轮询日志（getUpdates 每 1-2 秒一条，太吵）
+logging.getLogger('httpx').setLevel(logging.WARNING)
 
 # 数据和配置目录
 DATA_DIR = 'data'

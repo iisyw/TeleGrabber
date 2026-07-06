@@ -10,6 +10,7 @@ from .handlers import (
     download_document,
     download_document_video,
     process_animation,
+    handle_text_message,
     handle_unsupported,
 )
 from .callbacks import handle_callback_query

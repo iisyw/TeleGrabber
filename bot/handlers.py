@@ -6,6 +6,8 @@
 
 import asyncio
 import os
+import re
+import time
 import uuid
 
 from config import logger, USER_API_ENABLED
@@ -105,9 +107,8 @@ async def stats_command(update, context) -> None:
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 
-@restricted
-async def link_command(update, context) -> None:
-    """/link：通过 User API 按消息链接下载媒体。"""
+async def _process_link(update, context, args):
+    """链接下载核心逻辑，/link 命令和自动识别链接共用。"""
     if not USER_API_ENABLED:
         await update.message.reply_text(
             "❌ User API 未配置，无法通过消息链接下载。\n请先配置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH。",
@@ -115,15 +116,15 @@ async def link_command(update, context) -> None:
         )
         return
 
-    if not context.args:
+    if not args:
         await update.message.reply_text(
             "用法：/link https://t.me/channel/123\n或：/link channel 123\n或：/link -1001234567890 123",
             reply_to_message_id=update.message.message_id,
         )
         return
 
-    ref_text = " ".join(context.args)
-    parsed = user_api.parse_message_ref(context.args)
+    ref_text = " ".join(args)
+    parsed = user_api.parse_message_ref(args)
     if not parsed:
         await update.message.reply_text(
             "❌ 无法识别消息定位。请发送完整消息链接，或使用 /link username message_id / /link chat_id message_id。",
@@ -301,6 +302,23 @@ async def link_command(update, context) -> None:
         text=f"{'✅' if not has_failed else '❌'} {label}{'已保存' if not has_failed else '保存失败'}",
         reply_markup=_single_buttons(single_key, is_dup=False, has_failed=has_failed),
     )
+
+
+@restricted
+async def link_command(update, context) -> None:
+    """/link：通过 User API 按消息链接下载媒体。"""
+    await _process_link(update, context, context.args)
+
+
+@restricted
+async def handle_text_message(update, context) -> None:
+    """自动识别文本中的 Telegram 消息链接并下载，否则提示不支持。"""
+    text = update.message.text or ''
+    match = re.search(r'https?://t\.me/\S+', text)
+    if not match:
+        await handle_unsupported(update, context)
+        return
+    await _process_link(update, context, [match.group(0)])
 
 
 @restricted

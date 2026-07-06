@@ -3,6 +3,7 @@
 
 import os
 import time
+import errno
 import csv
 from datetime import datetime
 import logging
@@ -38,8 +39,17 @@ def get_save_directory(user, source=None, source_type=None):
         source_dir = os.path.join(SAVE_DIR, source)
     
     # 确保目录存在
-    if not os.path.exists(source_dir):
-        os.makedirs(source_dir, exist_ok=True)
+    # 重试处理 ESTALE (Stale file handle) — Docker overlay 文件系统常见问题
+    for attempt in range(3):
+        try:
+            if not os.path.exists(source_dir):
+                os.makedirs(source_dir, exist_ok=True)
+            return source_dir
+        except OSError as e:
+            if e.errno == errno.ESTALE and attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
     
     return source_dir
 
