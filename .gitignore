@@ -24,3 +24,6 @@ downloads/
 
 # SQLite 数据库
 *.db
+
+# 审计日志
+data/audit.jsonl

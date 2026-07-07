@@ -27,7 +27,7 @@ MEDIA_LABELS = {
     'photo': '图片',
     'video': '视频',
     'animation': '动画',
-    'document': '图片文件',
+    'document': '文件',
 }
 
 DOWNLOAD_METHOD_BOT = 'bot_api'
@@ -145,7 +145,7 @@ async def reply_duplicate(update, media_obj, media_type, caption):
         source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
 
     reply_msg = (
-        f"♻️ **检测到重复资源 ({label})**\n\n"
+        f"♻️ 检测到重复资源 ({label})\n\n"
         f"文件已存在: `{dup_info['filename']}`\n"
         f"最初来源: {source_display}\n"
         f"最初描述: {dup_info.get('caption') or '无'}\n"
@@ -154,12 +154,13 @@ async def reply_duplicate(update, media_obj, media_type, caption):
     return reply_msg
 
 
-def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix):
+def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix, header=None):
     """生成下载进度回调 (Pyrogram 签名: current, total)。
 
     回调在 Pyrogram 的事件循环线程里被调用，这里通过 run_coroutine_threadsafe
     把消息编辑调度回 PTB 的主事件循环（bot.edit_message_text 是协程）。
     带节流：百分比变化且至少间隔 2 秒才更新，100% 强制更新。
+    header 可选，若提供则显示在进度文本上方。
     """
     st = {"last_time": 0.0, "last_percent": -1}
 
@@ -177,10 +178,13 @@ def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix):
 
         async def _edit():
             try:
+                text = f"{prefix}\n进度: {percent}%"
+                if header:
+                    text = f"{header}\n\n{text}"
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=status_message_id,
-                    text=f"{prefix}\n进度: {percent}%",
+                    text=text,
                 )
             except Exception:
                 pass
@@ -201,7 +205,7 @@ def _stub_user(record):
     })
 
 
-async def download_large_from_record(bot, record, status_chat_id, status_message_id):
+async def download_large_from_record(bot, record, status_chat_id, status_message_id, header=None):
     """基于 record 通过 User API 下载大文件（用于按钮重下，脱离原始 update）。
 
     返回最终文件名或 None。
@@ -218,6 +222,7 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
     progress = _make_progress_callback(
         bot, loop, status_chat_id, status_message_id,
         prefix=f"⏳ 正在通过 User API 下载大{label}...",
+        header=header,
     )
 
     link_chat_id = record.get('link_chat_id')
@@ -314,7 +319,7 @@ async def download_small_from_record(bot, record):
 
 
 async def download_large_via_user_api(update, context, media_obj, media_type, date_dir,
-                                      ext, source_info, status_message):
+                                      ext, source_info, status_message, header=None):
     """通过 User API 下载大文件（含进度、溯源、回退、存库）。返回最终文件名或 None。
 
     User API 调用是阻塞的，放到默认线程池执行，避免阻塞 PTB 事件循环。
@@ -332,6 +337,7 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
     progress = _make_progress_callback(
         context.bot, loop, chat.id, status_message.message_id,
         prefix=f"⏳ 正在通过 User API 下载大{label}...",
+        header=header,
     ) if status_message else None
 
     # 溯源：优先用原始频道/消息 ID
@@ -409,4 +415,28 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
             except Exception:
                 pass
         logger.error(f"{MEDIA_LABELS.get(media_type, '文件')}下载失败: {e}")
+        return None
+
+
+def get_archive_ext(file_path):
+    """通过文件头检测压缩包/文档类型，返回扩展名。"""
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(8)
+        if header[:2] == b'PK':
+            return '.zip'
+        if header[:4] == b'Rar!':
+            return '.rar'
+        if header[:6] == b'7z\xbc\xaf\x27\x1c':
+            return '.7z'
+        if header[:2] == b'\x1f\x8b':
+            return '.gz'
+        if header[:5] == b'\xfd7zXZ':
+            return '.xz'
+        if header[:4] == b'\x25\x50\x44\x46':
+            return '.pdf'
+        if header[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
+            return '.doc'  # OLE2 format (doc/xls/ppt)
+        return None
+    except Exception:
         return None

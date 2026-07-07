@@ -5,6 +5,7 @@ import os
 import time
 import errno
 import csv
+import json
 from datetime import datetime
 import logging
 import mimetypes
@@ -13,7 +14,7 @@ import sqlite3
 import threading
 import contextlib
 
-from config import SAVE_DIR, DATA_DIR
+from config import SAVE_DIR, DATA_DIR, AUDIT_LOG
 
 logger = logging.getLogger(__name__)
 
@@ -181,9 +182,8 @@ def init_db():
 _db_lock = threading.Lock()
 
 def get_db_connection():
-    """获取数据库连接 (增加超时机制)"""
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    # 启用 WAL 模式提高并发性能
+    """获取数据库连接 (WAL 模式, 60s 超时)"""
+    conn = sqlite3.connect(DB_PATH, timeout=60)
     try:
         conn.execute('PRAGMA journal_mode=WAL')
     except:
@@ -208,19 +208,21 @@ def get_duplicate_info(file_unique_id):
     """根据 unique_id 查找重复项"""
     with _db_lock:
         conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT filename, source, caption, source_link FROM media_metadata WHERE file_unique_id = ?
-        ''', (file_unique_id,))
-        result = cursor.fetchone()
-        conn.close()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT filename, source, caption, source_link FROM media_metadata WHERE file_unique_id = ?
+            ''', (file_unique_id,))
+            row = cursor.fetchone()
+        finally:
+            conn.close()
     
-    if result:
+    if row:
         return {
-            'filename': result[0],
-            'source': result[1],
-            'caption': result[2],
-            'source_link': result[3]
+            'filename': row[0],
+            'source': row[1],
+            'caption': row[2],
+            'source_link': row[3],
         }
     return None
 
@@ -301,30 +303,32 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
     try:
         with _db_lock:
             conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO media_metadata (
-                    user_id, user_name, filename, datetime, file_id, file_unique_id, 
-                    media_group_id, media_type, caption, source, source_id, 
-                    source_link, source_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                user.id,
-                user.username or user.first_name,
-                file_name,
-                datetime.now().isoformat(),
-                media_obj.file_id,
-                media_obj.file_unique_id,
-                media_group_id or '',
-                media_type,
-                caption,
-                source or '',
-                source_id or '',
-                source_link or '',
-                source_type or 'unknown'
-            ))
-            conn.commit()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO media_metadata (
+                        user_id, user_name, filename, datetime, file_id, file_unique_id, 
+                        media_group_id, media_type, caption, source, source_id, 
+                        source_link, source_type
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    user.id,
+                    user.username or user.first_name,
+                    file_name,
+                    datetime.now().isoformat(),
+                    media_obj.file_id,
+                    media_obj.file_unique_id,
+                    media_group_id or '',
+                    media_type,
+                    caption,
+                    source or '',
+                    source_id or '',
+                    source_link or '',
+                    source_type or 'unknown'
+                ))
+                conn.commit()
+            finally:
+                conn.close()
         logger.debug(f"已将{media_type}元数据保存至数据库")
         
         # 同步保存到本地 CSV 作为物理备份 (如果指定了 save_dir)
@@ -448,3 +452,89 @@ def delete_media_records(file_unique_ids):
             conn.close()
 
     return delete_media_by_id(ids)
+
+
+# --- 审计日志 ---
+
+AUDIT_LOG_PATH = os.path.join(DATA_DIR, 'audit.jsonl')
+_audit_lock = threading.Lock()
+
+
+def append_audit(msg_type, message=None, group_info=None, raw_dict=None, note=None):
+    """记录收到的消息到审计日志，便于分析消息来源和模式。
+
+    参数:
+        msg_type: 消息类型 ('photo', 'video', 'media_group', 'text', 'link', ...)
+        message:  PTB Message 对象（含 to_dict 方法）
+        group_info: 媒体组的 group_info dict（当 message 为 None 时使用）
+        raw_dict:  任意字典，直接写入 raw 字段（覆盖自动提取的 raw）
+        note:      备注文本
+    """
+    if not AUDIT_LOG:
+        return
+
+    entry = {
+        'time': datetime.now().isoformat(),
+        'type': msg_type,
+    }
+
+    if message is not None:
+        try:
+            if hasattr(message, 'to_dict'):
+                entry['raw'] = message.to_dict()
+            elif isinstance(message, dict):
+                entry['raw'] = message
+        except Exception:
+            pass
+
+        # 提取常用字段方便 grep
+        try:
+            if hasattr(message, 'chat') and message.chat:
+                entry['chat_id'] = message.chat.id
+                entry['chat_type'] = message.chat.type
+            if hasattr(message, 'from_user') and message.from_user:
+                entry['user_id'] = message.from_user.id
+            if hasattr(message, 'caption') and message.caption:
+                entry['caption'] = message.caption[:500]
+            if hasattr(message, 'media_group_id') and message.media_group_id:
+                entry['media_group_id'] = message.media_group_id
+        except Exception:
+            pass
+
+    if group_info is not None:
+        try:
+            entry['chat_id'] = group_info.get('chat_id')
+            entry['media_group_id'] = group_info.get('media_group_id')
+            entry['user_id'] = group_info.get('user_id')
+            entry['source'] = group_info.get('source')
+            entry['source_link'] = group_info.get('source_link')
+            entry['source_type'] = group_info.get('source_type')
+            entry['caption'] = (group_info.get('caption') or '')[:500]
+            entry['chat_type'] = group_info.get('chat_type')
+            items = group_info.get('media_items', [])
+            entry['item_count'] = len(items)
+            entry['item_types'] = [m.get('media_type') for m in items]
+            # 优先使用完整的原始消息数据（包含 entities/caption_entities）
+            raw_msg = group_info.get('raw_message')
+            if isinstance(raw_msg, dict):
+                entry['raw'] = raw_msg
+            else:
+                # 降级：从 group_info 中提取已知字段
+                safe = {k: v for k, v in group_info.items() if k not in ('media_items', 'raw_message')}
+                safe['media_items_count'] = len(items)
+                entry['raw'] = safe
+        except Exception:
+            pass
+
+    if raw_dict is not None:
+        entry['raw'] = raw_dict
+
+    if note:
+        entry['note'] = note
+
+    try:
+        with _audit_lock:
+            with open(AUDIT_LOG_PATH, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    except Exception as e:
+        logger.warning(f"写入审计日志失败: {e}")

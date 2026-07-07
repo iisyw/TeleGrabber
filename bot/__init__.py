@@ -10,6 +10,7 @@ from .handlers import (
     download_document,
     download_document_video,
     process_animation,
+    download_document_archive,
     handle_text_message,
     handle_unsupported,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "download_document",
     "download_document_video",
     "process_animation",
+    "download_document_archive",
     "handle_unsupported",
     "handle_callback_query",
     "load_media_groups_collection",

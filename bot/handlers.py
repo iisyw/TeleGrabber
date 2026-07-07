@@ -10,10 +10,10 @@ import re
 import time
 import uuid
 
-from config import logger, USER_API_ENABLED
+from config import logger, USER_API_ENABLED, ALLOWED_FILE_EXTENSIONS
 from utils import (
     get_image_extension, get_video_extension, get_save_directory, get_library_stats,
-    generate_temp_filename, get_duplicate_info,
+    generate_temp_filename, get_duplicate_info, append_audit,
 )
 from bot import state
 from bot.helpers import restricted, get_forward_source_info
@@ -27,6 +27,7 @@ from bot.download import (
     reply_duplicate, download_large_via_user_api, save_small_file,
     build_single_record, _single_buttons,
     get_media_label, build_download_filename, save_media_metadata,
+    get_archive_ext,
 )
 import user_api
 
@@ -227,7 +228,7 @@ async def _process_link(update, context, args):
             chat_id=update.effective_chat.id,
             message_id=status_message.message_id,
             text=(
-                f"♻️ **检测到重复资源 ({label})**\n\n"
+                f"♻️ 检测到重复资源 ({label})\n\n"
                 f"文件已存在: `{dup_info['filename']}`\n"
                 f"最初来源: {source_display}\n"
                 f"最初描述: {dup_info.get('caption') or '无'}\n"
@@ -241,10 +242,20 @@ async def _process_link(update, context, args):
 
     final_filename = build_download_filename(media_info)
     final_path = os.path.join(date_dir, final_filename)
+    file_size = media_info.get('file_size', 0) or 0
+    size_str = f"{file_size/1024/1024:.1f}MB" if file_size >= 1024*1024 else f"{file_size/1024:.1f}KB"
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
         message_id=status_message.message_id,
-        text=f"🕓 正在通过 User API 下载{label}...",
+        text=(
+            f"📋 检测到资源\n"
+            f"类型: {label}\n"
+            f"大小: {size_str}\n"
+            f"来源: {media_info.get('source') or '未知'}\n\n"
+            f"⏳ 正在通过 User API 下载..."
+        ),
+        parse_mode='Markdown',
+        disable_web_page_preview=True,
     )
 
     progress_state = {"last_time": 0.0, "last_percent": -1}
@@ -265,7 +276,13 @@ async def _process_link(update, context, args):
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id,
                     message_id=status_message.message_id,
-                    text=f"☁️ 正在通过 User API 下载{label}... {percent}%",
+                    text=(
+                        f"📋 检测到资源\n"
+                        f"类型: {label}\n"
+                        f"大小: {size_str}\n"
+                        f"来源: {media_info.get('source') or '未知'}\n\n"
+                        f"☁️ 正在通过 User API 下载... {percent}%"
+                    ),
                 )
             except Exception:
                 pass
@@ -299,7 +316,15 @@ async def _process_link(update, context, args):
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
         message_id=status_message.message_id,
-        text=f"{'✅' if not has_failed else '❌'} {label}{'已保存' if not has_failed else '保存失败'}",
+        text=(
+            f"📋 检测到资源\n"
+            f"类型: {label}\n"
+            f"大小: {size_str}\n"
+            f"来源: {media_info.get('source') or '未知'}\n\n"
+            f"{'✅' if not has_failed else '❌'} {label}{'已保存' if not has_failed else '保存失败'}"
+        ),
+        parse_mode='Markdown',
+        disable_web_page_preview=True,
         reply_markup=_single_buttons(single_key, is_dup=False, has_failed=has_failed),
     )
 
@@ -307,18 +332,23 @@ async def _process_link(update, context, args):
 @restricted
 async def link_command(update, context) -> None:
     """/link：通过 User API 按消息链接下载媒体。"""
+    append_audit('link', message=update.message, note=f"args: {context.args}")
     await _process_link(update, context, context.args)
 
 
 @restricted
 async def handle_text_message(update, context) -> None:
-    """自动识别文本中的 Telegram 消息链接并下载，否则提示不支持。"""
-    text = update.message.text or ''
+    """自动识别文本中的 Telegram 消息链接并下载，否则用 LLM 分析转发文本。"""
+    message = update.message
+    text = message.text or ''
+    append_audit('text', message=message, note=f"text_len:{len(text)}")
+
     match = re.search(r'https?://t\.me/\S+', text)
-    if not match:
-        await handle_unsupported(update, context)
+    if match:
+        await _process_link(update, context, [match.group(0)])
         return
-    await _process_link(update, context, [match.group(0)])
+
+    await handle_unsupported(update, context)
 
 
 @restricted
@@ -333,12 +363,12 @@ async def handle_unsupported(update, context) -> None:
     )
 
 
-async def _reply(update, text):
+async def _reply(update, text, parse_mode=None):
     """统一回复到原消息，便于刷屏时对应。返回发出的消息对象。"""
-    return await update.message.reply_text(text, reply_to_message_id=update.message.message_id)
+    return await update.message.reply_text(text, reply_to_message_id=update.message.message_id, parse_mode=parse_mode)
 
 
-async def _edit_or_reply(context, update, status_message, text, reply_markup=None):
+async def _edit_or_reply(context, update, status_message, text, reply_markup=None, parse_mode=None):
     """优先编辑已有状态消息；编辑失败则退化为新回复。"""
     if status_message:
         try:
@@ -346,13 +376,15 @@ async def _edit_or_reply(context, update, status_message, text, reply_markup=Non
                 chat_id=update.effective_chat.id,
                 message_id=status_message.message_id,
                 text=text,
+                parse_mode=parse_mode,
                 reply_markup=reply_markup,
             )
             return
         except Exception:
             pass
     await update.message.reply_text(
-        text, reply_to_message_id=update.message.message_id, reply_markup=reply_markup,
+        text, reply_to_message_id=update.message.message_id,
+        parse_mode=parse_mode, reply_markup=reply_markup,
     )
 
 
@@ -367,6 +399,8 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
     date_dir = get_save_directory(update.effective_user, source_info[0], source_type)
     label = MEDIA_LABELS.get(media_type, '文件')
     chat = update.effective_chat
+
+    append_audit(media_type, message=message, note=f"single_media:{media_type}")
 
     single_key = uuid.uuid4().hex[:12]
 
@@ -384,17 +418,22 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
         return
 
     file_size = getattr(media_obj, 'file_size', 0) or 0
+    use_user_api = USER_API_ENABLED and file_size >= LARGE_FILE_THRESHOLD
+    method = 'User API' if use_user_api else 'Bot API'
+    size_str = f"{file_size/1024/1024:.1f}MB" if file_size >= 1024*1024 else f"{file_size/1024:.1f}KB"
+    detect_label = {'photo': '单张图片', 'video': '单个视频'}.get(media_type, label)
+    header = f"📋 检测到{detect_label}\n大小: {size_str}\n通道: {method}"
 
     # 2. 大文件走 User API（带进度）
     if USER_API_ENABLED and file_size >= LARGE_FILE_THRESHOLD:
-        status_message = await _reply(update, f"⏳ 检测到大{label} ({file_size/1024/1024:.1f}MB)，正在通过 User API 下载...")
+        status_message = await _reply(update, f"{header}\n\n⏳ 正在通过 User API 下载...", parse_mode='Markdown')
         final_filename = await download_large_via_user_api(
             update, context, media_obj, media_type, date_dir,
-            ext_for_large, source_info, status_message,
+            ext_for_large, source_info, status_message, header=header,
         )
     else:
         # 3. 小文件走 Bot API
-        status_message = await _reply(update, f"⏳ 正在保存{label}...")
+        status_message = await _reply(update, f"{header}\n\n⏳ 正在保存...", parse_mode='Markdown')
         final_filename = await save_small_file(update, media_obj, media_type, date_dir, source_info, detect_ext)
 
     # 登记记录并附带按钮
@@ -404,11 +443,12 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
     state.put_single_record(single_key, record)
 
     if final_filename:
-        result_text = f"✅ {label}已保存"
+        result_text = f"{header}\n\n✅ {label}已保存"
     else:
         result_text = f"❌ {label}保存失败"
     await _edit_or_reply(
         context, update, status_message, result_text,
+        parse_mode='Markdown',
         reply_markup=_single_buttons(single_key, is_dup=False, has_failed=not final_filename),
     )
 
@@ -544,4 +584,32 @@ async def process_animation(update, context) -> None:
     await _handle_single_media(
         update, context, animation, 'animation',
         ext_for_large=large_ext, detect_ext=detect_ext,
+    )
+
+
+@restricted
+async def download_document_archive(update, context) -> None:
+    """下载通用文件（压缩包、APK 等非图片/视频文档）。"""
+    message = update.message
+    document = message.document
+
+    file_name = document.file_name or 'file'
+    _, ext = os.path.splitext(file_name)
+    ext = ext.lower()
+
+    allowed = ALLOWED_FILE_EXTENSIONS
+    if ext not in allowed:
+        await message.reply_text(
+            f"❌ 不支持的文件类型 `{ext}`\n支持的扩展名: {', '.join(allowed)}",
+            reply_to_message_id=message.message_id,
+        )
+        return
+
+    def detect_ext(temp_path):
+        detected = get_archive_ext(temp_path)
+        return detected or ext
+
+    await _handle_single_media(
+        update, context, document, 'document',
+        ext_for_large=ext, detect_ext=detect_ext,
     )

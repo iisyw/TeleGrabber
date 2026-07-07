@@ -19,6 +19,7 @@ from config import logger, USER_API_ENABLED
 from utils import (
     get_save_directory, generate_temp_filename, get_image_extension,
     get_video_extension, save_to_db, get_duplicate_info, delete_media_records,
+    append_audit,
 )
 import user_api
 from bot import state
@@ -142,7 +143,8 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
                 'source_link': source_link,
                 'source_type': source_type,
                 'chat_type': chat_type or (message.chat.type if message else None),
-                'caption': message.caption if message else None
+                'caption': message.caption if message else None,
+                'raw_message': message.to_dict() if message and hasattr(message, 'to_dict') else None,
             }
             need_queue_hint = state.is_processing_media_group or bool(state.pending_media_groups)
         else:
@@ -256,6 +258,43 @@ async def process_media_group(context, collection_key=None, is_retry=False, retr
     bot = context.bot
     bot_username = context.bot.username
 
+    append_audit('media_group', group_info=group_info)
+
+    media_items = group_info.get('media_items', [])
+    total = len(media_items)
+    for item in media_items:
+        item.setdefault('download_method', DOWNLOAD_METHOD_USER if item.get('file_size', 0) >= 20 * 1024 * 1024 else DOWNLOAD_METHOD_BOT)
+    photo_count = sum(1 for m in media_items if m.get('media_type') == 'photo')
+    video_count = sum(1 for m in media_items if m.get('media_type') == 'video')
+    doc_count = total - photo_count - video_count
+    user_api_indices = [i+1 for i, m in enumerate(media_items) if m.get('download_method') == DOWNLOAD_METHOD_USER]
+    user_api_count = len(user_api_indices)
+
+    header_parts = [f"📁 检测到媒体组 ({total}项)"]
+    if photo_count:
+        header_parts.append(f"🖼️ 图片: {photo_count}张")
+    if video_count:
+        header_parts.append(f"🎬 视频: {video_count}个")
+    if doc_count:
+        header_parts.append(f"📄 文件: {doc_count}个")
+    if user_api_count == total:
+        header_parts.append(f"📡 全部通过 User API 下载")
+    elif user_api_count:
+        idx_str = '、'.join(str(i) for i in user_api_indices)
+        header_parts.append(f"☁️ 第{idx_str}项通过 User API 下载")
+    else:
+        header_parts.append(f"📡 全部通过 Bot API 下载")
+    header = "\n".join(header_parts)
+
+    group_info['_mg_header'] = header
+
+    await context.bot.edit_message_text(
+        chat_id=group_info['chat_id'],
+        message_id=group_info['status_message_id'],
+        text=f"{header}\n\n⏳ 正在下载媒体组...",
+        parse_mode='Markdown',
+    )
+
     # 把阻塞的下载与汇总整体丢到线程池，内部对 bot 的调用通过 loop 桥接
     await loop.run_in_executor(
         None,
@@ -263,6 +302,7 @@ async def process_media_group(context, collection_key=None, is_retry=False, retr
             bot, loop, bot_username, collection_key, group_info, is_retry, retry_type
         ),
     )
+
 
 
 def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_info, is_retry, retry_type):
@@ -311,8 +351,14 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                 if item.get('status') == 3:
                     item['status'] = 0
 
+    mg_header = group_info.get('_mg_header', '')
+    items_status = [item.get('status', 0) for item in media_items]
+
     if status_message_id:
-        _edit_status_threadsafe(bot, loop, chat_id, status_message_id, f"⏳ 正在并发保存媒体组：0/{total_items}")
+        progress_text = f"正在保存媒体组...\n进度: {build_progress_bar(media_items, items_status, [0] * total_items)} (0/{total_items})"
+        if mg_header:
+            progress_text = f"{mg_header}\n\n{progress_text}"
+        _edit_status_threadsafe(bot, loop, chat_id, status_message_id, progress_text)
 
     # 准备目录
     user_id = group_info.get('user_id')
@@ -326,7 +372,6 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
     caption = group_info.get('caption')
     skipped_duplicates = []
 
-    items_status = [item.get('status', 0) for item in media_items]
     item_progress = [0] * total_items
     for item in media_items:
         item.setdefault('download_method', DOWNLOAD_METHOD_BOT)
@@ -361,9 +406,12 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                 InlineKeyboardButton("🗑️ 删除本次内容", callback_data=f"mg_delete:{collection_key}")
             ]
         ]
+        progress_text = f"正在保存媒体组...\n进度: {get_progress_bar()} ({processed_count['value']}/{total_items})"
+        if mg_header:
+            progress_text = f"{mg_header}\n\n{progress_text}"
         _edit_status_threadsafe(
             bot, loop, chat_id, status_message_id,
-            f"正在保存媒体组...\n进度: {get_progress_bar()} ({processed_count['value']}/{total_items})",
+            progress_text,
             reply_markup=InlineKeyboardMarkup(button_list),
         )
 
@@ -538,7 +586,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
         dup_count = sum(1 for s in items_status if s == 2)
         total_success = success_count + dup_count
 
-        finish_text = f"✅ 媒体组保存完成！({total_success}/{total_items}个项，用时{elapsed_time:.1f}秒)\n"
+        finish_text = f"{mg_header}\n\n✅ 媒体组保存完成！({total_success}/{total_items}个项，用时{elapsed_time:.1f}秒)\n"
         finish_text += f"结果: {get_progress_bar()}\n"
         if skipped_duplicates:
             skipped_duplicates.sort(key=lambda x: x['index'])

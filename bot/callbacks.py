@@ -120,6 +120,12 @@ async def _single_redownload(query, context, record, single_key, force):
     chat_id = query.message.chat_id
     message_id = query.message.message_id
     label = MEDIA_LABELS.get(record['media_type'], '文件')
+    file_size = record.get('file_size', 0) or 0
+    size_str = f"{file_size/1024/1024:.1f}MB" if file_size >= 1024*1024 else f"{file_size/1024:.1f}KB"
+    detect_label = {'photo': '单张图片', 'video': '单个视频'}.get(record['media_type'], label)
+    use_user_api = record.get('download_method') == 'user_api' or file_size >= 20 * 1024 * 1024
+    method = 'User API' if use_user_api else 'Bot API'
+    header = f"📋 检测到{detect_label}\n大小: {size_str}\n通道: {method}"
 
     # 清理旧记录：force 删任何已存在的同 unique_id；普通重下删本次已存的
     if force or record.get('final_filename'):
@@ -128,25 +134,29 @@ async def _single_redownload(query, context, record, single_key, force):
     # 在原消息上显示"重下中"（先去掉按钮，避免下载中被重复点击）
     try:
         await bot.edit_message_text(
-            chat_id=chat_id, message_id=message_id, text=f"⏳ 正在重新下载{label}...",
+            chat_id=chat_id, message_id=message_id, text=f"{header}\n\n⏳ 正在重新下载...",
+            parse_mode='Markdown',
         )
     except Exception:
         pass
 
-    use_user_api = record.get('download_method') == 'user_api' or record.get('file_size', 0) >= 20 * 1024 * 1024
     if use_user_api:
         # User API 进度回调也更新这条原消息；/link 来源即使是小文件也走这里。
-        final_filename = await download_large_from_record(bot, record, chat_id, message_id)
+        final_filename = await download_large_from_record(bot, record, chat_id, message_id, header=header)
     else:
         final_filename = await download_small_from_record(bot, record)
 
     record['is_dup'] = False  # 重下后不再是"重复"态
     state.put_single_record(single_key, record)
 
-    text = f"✅ {label}已重新保存" if final_filename else f"❌ {label}重新下载失败"
+    if final_filename:
+        text = f"{header}\n\n✅ {label}已重新保存"
+    else:
+        text = f"❌ {label}重新下载失败"
     try:
         await bot.edit_message_text(
             chat_id=chat_id, message_id=message_id, text=text,
+            parse_mode='Markdown',
             reply_markup=_single_buttons(single_key, is_dup=False, has_failed=not final_filename),
         )
     except Exception as e:
@@ -168,11 +178,13 @@ async def _handle_refresh(query, collection_key):
 
     processed_count = sum(1 for s in items_status if s in [1, 2, 3])
     total_count = len(items_status)
+    mg_header = group_info.get('_mg_header', '')
 
     # refresh 无法获取下载线程内部的实时百分比，下载中项以 0% 占位（仅影响显示，不影响状态）
     progress_bar = build_progress_bar(media_items, items_status, [0] * total_count)
     status_text = "保存完成 (已手动刷新)" if processed_count >= total_count else "正在保存媒体组..."
-    new_text = f"**{status_text}**\n进度: {progress_bar} ({processed_count}/{total_count})"
+    progress_text = f"**{status_text}**\n进度: {progress_bar} ({processed_count}/{total_count})"
+    new_text = f"{mg_header}\n\n{progress_text}" if mg_header else progress_text
 
     button_list = [[
         InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),
@@ -254,3 +266,6 @@ async def _handle_delete(query, collection_key):
         )
     else:
         await query.edit_message_text("ℹ️ 本次下载没有产生任何有效文件或记录。", reply_markup=retry_keyboard)
+
+
+

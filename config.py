@@ -80,6 +80,13 @@ if USER_API_ENABLED:
 else:
     logger.warning("User API (MTProto) 未配置，无法下载超过 20MB 的文件")
 
+# 允许下载的文件扩展名白名单（逗号分隔，用于通用文件下载）
+ALLOWED_FILE_EXTENSIONS_STR = os.getenv('ALLOWED_FILE_EXTENSIONS', '.zip,.rar,.7z,.apk,.tar,.gz,.tgz,.pdf,.doc,.docx,.xls,.xlsx,.exe,.iso')
+ALLOWED_FILE_EXTENSIONS = [ext.strip().lower() for ext in ALLOWED_FILE_EXTENSIONS_STR.split(',') if ext.strip()]
+
+# 审计日志：记录每条收到的消息的源信息和原始数据到 audit.jsonl，方便分析
+AUDIT_LOG = os.getenv('AUDIT_LOG', 'true').lower() in ('true', '1', 'yes')
+
 # GitHub仓库地址
 GITHUB_REPO = "https://github.com/iisyw/TeleGrabber"
 

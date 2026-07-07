@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import uvicorn
-from utils import DB_PATH, SAVE_DIR, delete_media_records
+from utils import DB_PATH, SAVE_DIR, delete_media_records, get_db_connection
 from config import WEB_USERNAME, WEB_PASSWORD
 
 # 配置日志
@@ -102,7 +102,7 @@ def get_media(
 ):
     """获取媒体记录列表"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         query = "SELECT id, user_id, user_name, filename, datetime, media_group_id, media_type, caption, source, source_link, source_type, file_unique_id FROM media_metadata"
@@ -150,7 +150,7 @@ def get_media(
 def get_media_groups(source: Optional[str] = None):
     """获取指定来源下的所有媒体组ID"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         query = "SELECT DISTINCT media_group_id FROM media_metadata"
         params = []
@@ -170,7 +170,7 @@ def get_media_groups(source: Optional[str] = None):
 def get_sources():
     """获取所有来源渠道列表"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT source FROM media_metadata WHERE source IS NOT NULL AND source != ''")
         sources = [row[0] for row in cursor.fetchall()]
@@ -189,7 +189,7 @@ def get_stats(
     """获取媒体统计信息。支持与 /api/media 相同的筛选参数，
     用于前端显示"当前筛选条件下的数量"。"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
 
         query = "SELECT COUNT(*) FROM media_metadata"
@@ -239,7 +239,7 @@ def delete_media(id: int, _user: str = Depends(require_auth)):
 def delete_media_group(media_group_id: str, _user: str = Depends(require_auth)):
     """删除整个媒体组及其物理文件"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT file_unique_id FROM media_metadata WHERE media_group_id = ?", (media_group_id,))
         unique_ids = [row[0] for row in cursor.fetchall()]

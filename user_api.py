@@ -524,6 +524,33 @@ def run_download_message_media(chat_id, message_id, final_path, progress_callbac
         logger.error(f"User API 链接下载任务失败: {e}", exc_info=True)
         return False
 
+async def _get_chat_pinned_message(chat_id):
+    """获取对话的置顶消息文本。"""
+    try:
+        client = get_pyrogram_client()
+        chat = await client.get_chat(chat_id)
+        if chat.pinned_message and chat.pinned_message.text:
+            return chat.pinned_message.text
+        return None
+    except Exception as e:
+        logger.warning(f"获取置顶消息失败 {chat_id}: {e}")
+        return None
+
+
+def run_get_chat_pinned_message(chat_id):
+    """同步获取对话置顶消息文本。"""
+    get_pyrogram_client()
+    future = asyncio.run_coroutine_threadsafe(
+        _get_chat_pinned_message(chat_id),
+        _loop
+    )
+    try:
+        return future.result(timeout=30)
+    except Exception as e:
+        logger.error(f"获取置顶消息失败: {e}")
+        return None
+
+
 def stop_user_api():
     """停止 User API 客户端 (优雅退出)"""
     global _app, _loop

@@ -50,6 +50,12 @@ def build_application():
     # 以"文件"方式发送的源文件视频不会命中 filters.VIDEO，单独接收
     app.add_handler(MessageHandler(filters.Document.VIDEO, bot.download_document_video))
 
+    # 通用文件下载（压缩包、APK 等）
+    app.add_handler(MessageHandler(
+        filters.Document.ALL & ~filters.Document.IMAGE & ~filters.Document.VIDEO,
+        bot.download_document_archive,
+    ))
+
     # 文本消息：自动识别 Telegram 链接并下载
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text_message))
 
