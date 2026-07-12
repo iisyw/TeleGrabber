@@ -37,4 +37,8 @@ downloads/
 # Docker
 .dockerignore
 Dockerfile
-docker-compose.yml 
+docker-compose.yml
+
+# 运行时数据（DB、session、审计日志）
+data/
+!data/.env.example
