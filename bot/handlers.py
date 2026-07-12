@@ -179,8 +179,10 @@ async def _process_link(update, context, args):
             'media_items': media_items,
             'status_message_id': status_message.message_id,
             'source_name': first_item.get('source_name'),
+            'source_username': first_item.get('source_username'),
             'source_id': first_item.get('source_id'),
-            'source_link': first_item.get('source_link') or ref_text,
+            'source_link1': first_item.get('source_link1') or ref_text,
+            'source_link2': first_item.get('source_link2'),
             'source_type': first_item.get('source_type'),
             'caption': first_item.get('caption'),
             'chat_type': update.effective_chat.type,
@@ -207,7 +209,9 @@ async def _process_link(update, context, args):
         'file_size': media_info.get('file_size', 0) or 0,
         'source_name': media_info.get('source_name'),
         'source_id': media_info.get('source_id'),
-        'source_link': media_info.get('source_link') or ref_text,
+        'source_link1': media_info.get('source_link1') or ref_text,
+        'source_link2': media_info.get('source_link2'),
+        'source_username': media_info.get('source_username'),
         'source_type': media_info.get('source_type'),
         'chat_id': update.effective_chat.id,
         'chat_type': update.effective_chat.type,
@@ -223,8 +227,8 @@ async def _process_link(update, context, args):
 
     if dup_info:
         source_display = dup_info.get('source_name') or '未知'
-        if dup_info.get('source_link'):
-            source_display = f"[{dup_info['source_name']}]({dup_info['source_link']})"
+        if dup_info.get('source_link1'):
+            source_display = f"[{dup_info['source_name']}]({dup_info['source_link1']})"
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=status_message.message_id,
@@ -307,7 +311,7 @@ async def _process_link(update, context, args):
     if success:
         db_success = save_media_metadata(
             update.effective_user, media_info, final_filename,
-            save_dir=date_dir, fallback_link=ref_text,
+            save_dir=date_dir, fallback_link1=ref_text,
             message_time=media_info.get('message_date'),
         )
         if db_success:
@@ -404,8 +408,8 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
     """
     message = update.message
     source_info = get_forward_source_info(message)
-    source_type = source_info[3]
-    date_dir = get_save_directory(update.effective_user, source_info[0], source_type)
+    source_type = source_info['source_type']
+    date_dir = get_save_directory(update.effective_user, source_info['source_name'], source_type)
     label = MEDIA_LABELS.get(media_type, '文件')
     chat = update.effective_chat
 

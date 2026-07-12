@@ -188,7 +188,9 @@ def init_db():
             caption TEXT,
             source_name TEXT,
             source_id TEXT,
-            source_link TEXT,
+            source_username TEXT DEFAULT '',
+            source_link1 TEXT,
+            source_link2 TEXT DEFAULT '',
             source_type TEXT,
             message_time TEXT,
             message_id INTEGER,
@@ -200,15 +202,24 @@ def init_db():
         cursor.execute("ALTER TABLE media_metadata RENAME COLUMN source TO source_name")
     except sqlite3.OperationalError:
         pass
+    # 迁移 source_link → source_link1
+    try:
+        cursor.execute("ALTER TABLE media_metadata RENAME COLUMN source_link TO source_link1")
+    except sqlite3.OperationalError:
+        pass
     # 为已有数据库添加缺失的列
-    for col in ['message_time', 'message_id', 'remark']:
+    for col in ['message_time', 'message_id', 'remark', 'source_username', 'source_link2']:
         try:
             if col == 'message_time':
                 cursor.execute("ALTER TABLE media_metadata ADD COLUMN message_time TEXT")
             elif col == 'message_id':
                 cursor.execute("ALTER TABLE media_metadata ADD COLUMN message_id INTEGER")
-            else:
+            elif col == 'remark':
                 cursor.execute("ALTER TABLE media_metadata ADD COLUMN remark TEXT DEFAULT ''")
+            elif col == 'source_username':
+                cursor.execute("ALTER TABLE media_metadata ADD COLUMN source_username TEXT DEFAULT ''")
+            elif col == 'source_link2':
+                cursor.execute("ALTER TABLE media_metadata ADD COLUMN source_link2 TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
     cursor.execute('PRAGMA journal_mode=WAL')
@@ -234,7 +245,9 @@ def init_db():
         ('media_metadata', 'caption', '原始文案'),
         ('media_metadata', 'source_name', '来源名称（原始发送者的频道标题/群组名/用户名/bot名）'),
         ('media_metadata', 'source_id', '来源 ID（原始发送者的 chat_id）'),
-        ('media_metadata', 'source_link', '来源链接（频道含 message_id 指向具体消息，群组/用户仅来源主页）'),
+        ('media_metadata', 'source_link1', '来源链接1（优先用户名格式，如 https://t.me/username/msg_id）'),
+        ('media_metadata', 'source_link2', '来源链接2（数字 ID 格式，如 https://t.me/c/id/msg_id）'),
+        ('media_metadata', 'source_username', '来源用户名（Telegram 用户名，如 sifangktv10）'),
         ('media_metadata', 'source_type', '来源类型：channel/bot/group/private_user（原始发送者类型）'),
         ('media_metadata', 'message_time', '原始消息时间（本地时间，转发时取原消息时间）'),
         ('media_metadata', 'message_id', '原始消息 ID（转发时取原消息 ID）'),
@@ -276,7 +289,7 @@ def get_duplicate_info(file_unique_id):
         try:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT filename, source_name, caption, source_link FROM media_metadata WHERE file_unique_id = ?
+                SELECT filename, source_name, caption, source_username, source_link1, source_link2 FROM media_metadata WHERE file_unique_id = ?
             ''', (file_unique_id,))
             row = cursor.fetchone()
         finally:
@@ -287,7 +300,9 @@ def get_duplicate_info(file_unique_id):
             'filename': row[0],
             'source_name': row[1],
             'caption': row[2],
-            'source_link': row[3],
+            'source_username': row[3],
+            'source_link1': row[4],
+            'source_link2': row[5],
         }
     return None
 
@@ -321,7 +336,7 @@ def get_library_stats():
     return stats
 
 
-def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, media_type='photo', caption=None, source_name=None, source_id=None, source_link=None, source_type=None, message_time=None, message_id=None, remark=None):
+def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, media_type='photo', caption=None, source_name=None, source_id=None, source_link1=None, source_link2=None, source_username=None, source_type=None, message_time=None, message_id=None, remark=None):
     """将媒体元数据保存到SQLite数据库"""
     if not caption:
         caption = ''
@@ -339,8 +354,8 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
                     INSERT INTO media_metadata (
                         user_id, user_name, filename, datetime, file_id, file_unique_id,
                         media_group_id, media_type, caption, source_name, source_id,
-                        source_link, source_type, message_time, message_id, remark
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_username, source_link1, source_link2, source_type, message_time, message_id, remark
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     user.id,
                     user.username or user.first_name,
@@ -353,7 +368,9 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
                     caption,
                     source_name or '',
                     source_id or '',
-                    source_link or '',
+                    source_username or '',
+                    source_link1 or '',
+                    source_link2 or '',
                     source_type or 'unknown',
                     message_time,
                     message_id,
@@ -564,7 +581,8 @@ def append_audit(msg_type, message=None, group_info=None, raw_dict=None, note=No
             entry['media_group_id'] = group_info.get('media_group_id')
             entry['user_id'] = group_info.get('user_id')
             entry['source_name'] = group_info.get('source_name')
-            entry['source_link'] = group_info.get('source_link')
+            entry['source_link1'] = group_info.get('source_link1')
+            entry['source_link2'] = group_info.get('source_link2')
             entry['source_type'] = group_info.get('source_type')
             entry['caption'] = (group_info.get('caption') or '')[:500]
             entry['chat_type'] = group_info.get('chat_type')

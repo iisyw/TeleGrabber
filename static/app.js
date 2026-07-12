@@ -343,8 +343,10 @@ async function loadMedia(reset) {
       /* Append older items to end (keep DESC order), then reverse gives chronological */
       const anchor = feed.scrollHeight - feed.scrollTop;
       state.mediaList = state.mediaList.concat(data);
+      feed.style.opacity = '0';
       renderFeed(false);
       feed.scrollTop = feed.scrollHeight - anchor;
+      feed.style.opacity = '1';
     }
   } catch (e) {
     console.error('loadMedia failed', e);
@@ -889,9 +891,11 @@ function createBubble(items, isGroup) {
     bubble.appendChild(ts);
   }
 
-  if (isGroup && n > 4) {
-    ts.innerHTML += '<div class="timestamp-count">· ' + n + ' 项</div>';
-  }
+  /* Message ID + item count */
+  let extra = '';
+  if (refItem.message_id != null) extra += ' #' + refItem.message_id;
+  if (isGroup && n > 4) extra += ' · ' + n + ' 项';
+  if (extra) ts.innerHTML += '<div class="timestamp-count">' + extra.trim() + '</div>';
 
   bubble.appendChild(ts);
   msg.appendChild(bubble);
@@ -975,12 +979,11 @@ function renderModalItem() {
   /* 类型 */
   html += '<div class="meta-item"><span class="meta-label">类型: </span>' + esc(item.media_type || '') + '</div>';
 
+  html += '<div class="meta-divider"></div>';
+
+  /* 来源名称 */
   if (item.source_name) {
-    let srcTxt = esc(item.source_name);
-    if (item.source_link) {
-      srcTxt += ' <a href="' + esc(item.source_link) + '" target="_blank" rel="noopener" style="color:var(--accent)">原消息</a>';
-    }
-    html += '<div class="meta-item"><span class="meta-label">来源: </span>' + srcTxt + '</div>';
+    html += '<div class="meta-item"><span class="meta-label">来源名称: </span>' + esc(item.source_name) + '</div>';
   }
 
   /* 来源类型 */
@@ -993,12 +996,49 @@ function renderModalItem() {
     html += '<div class="meta-item"><span class="meta-label">来源 ID: </span>' + esc(item.source_id) + '</div>';
   }
 
-  /* 用户 */
-  if (item.user_name) {
-    html += '<div class="meta-item"><span class="meta-label">用户: </span>' + esc(item.user_name) + '</div>';
+  /* 来源用户名 */
+  if (item.source_username) {
+    html += '<div class="meta-item"><span class="meta-label">来源用户名: </span>' + esc(item.source_username) + '</div>';
+  } else if (item.source_name) {
+    html += '<div class="meta-item"><span class="meta-label">来源用户名: </span>-</div>';
   }
+
+  /* 来源链接1 */
+  if (item.source_link1) {
+    html += '<div class="meta-item"><span class="meta-label">来源链接1: </span><a href="' + esc(item.source_link1) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + esc(item.source_link1) + '</a></div>';
+  } else if (item.source_username && item.message_id != null) {
+    var link1 = 'https://t.me/' + esc(item.source_username) + '/' + item.message_id;
+    html += '<div class="meta-item"><span class="meta-label">来源链接1: </span><a href="' + link1 + '" target="_blank" rel="noopener" style="color:var(--accent)">' + link1 + '</a></div>';
+  }
+
+  /* 来源链接2 */
+  if (item.source_link2) {
+    html += '<div class="meta-item"><span class="meta-label">来源链接2: </span><a href="' + esc(item.source_link2) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + esc(item.source_link2) + '</a></div>';
+  } else if (item.source_id && item.message_id != null) {
+    var link2 = 'https://t.me/c/' + esc(item.source_id) + '/' + item.message_id;
+    html += '<div class="meta-item"><span class="meta-label">来源链接2: </span><a href="' + link2 + '" target="_blank" rel="noopener" style="color:var(--accent)">' + link2 + '</a></div>';
+  }
+
+  html += '<div class="meta-divider"></div>';
+
+  /* 用户 ID / 用户名 */
   if (item.user_id != null) {
     html += '<div class="meta-item"><span class="meta-label">用户 ID: </span>' + item.user_id + '</div>';
+  }
+  if (item.user_name) {
+    html += '<div class="meta-item"><span class="meta-label">用户名: </span>' + esc(item.user_name) + '</div>';
+  }
+
+  html += '<div class="meta-divider"></div>';
+
+  /* 媒体组 ID */
+  if (item.media_group_id) {
+    html += '<div class="meta-item"><span class="meta-label">媒体组 ID: </span>' + esc(item.media_group_id) + '</div>';
+  }
+
+  /* 消息 ID */
+  if (item.message_id != null) {
+    html += '<div class="meta-item"><span class="meta-label">消息 ID: </span>' + item.message_id + '</div>';
   }
 
   /* 消息时间 */
@@ -1011,21 +1051,14 @@ function renderModalItem() {
     html += '<div class="meta-item"><span class="meta-label">储存时间: </span>' + esc(fmt(item.datetime)) + '</div>';
   }
 
-  /* 媒体组 */
-  if (item.media_group_id) {
-    html += '<div class="meta-item"><span class="meta-label">媒体组: </span>' + esc(item.media_group_id) + '</div>';
-  }
-
-  /* 消息 ID */
-  if (item.message_id != null) {
-    html += '<div class="meta-item"><span class="meta-label">消息 ID: </span>' + item.message_id + '</div>';
-  }
-
-  /* file_id / file_unique_id */
+  /* 其他信息（折叠） */
+  html += '<div class="meta-toggle" onclick="toggleMetaExtra(this)">其他信息 ▸</div>';
+  html += '<div class="meta-hidden" id="metaExtra">';
   if (item.file_id) {
     html += '<div class="meta-item"><span class="meta-label">File ID: </span>' + esc(item.file_id) + '</div>';
   }
   html += '<div class="meta-item"><span class="meta-label">Unique ID: </span>' + esc(item.file_unique_id || '') + '</div>';
+  html += '</div>';
 
   meta.innerHTML = html;
 
@@ -1052,6 +1085,14 @@ function nextModal() {
     state.modalIndex++;
     renderModalItem();
   }
+}
+
+function toggleMetaExtra(el) {
+  const extra = document.getElementById('metaExtra');
+  if (!extra) return;
+  const hidden = extra.style.display === 'none' || extra.style.display === '';
+  extra.style.display = hidden ? 'block' : 'none';
+  el.textContent = hidden ? '其他信息 ▾' : '其他信息 ▸';
 }
 
 function closeModal() {
@@ -1160,14 +1201,15 @@ loadStats();
   }
 }
 
-function switchSort() {
-  state.sortBy = state.sortBy === 'message_time' ? 'datetime' : 'message_time';
+function switchSort(sort) {
+  if (state.sortBy === sort) return;
+  state.sortBy = sort;
   state.mediaList = [];
   state.offset = 0;
   state.isLastPage = false;
-  const btn = document.getElementById('sortToggle');
-  btn.textContent = state.sortBy === 'message_time' ? '消息时间' : '下载时间';
-  btn.classList.toggle('active', state.sortBy !== 'message_time');
+  qsa('.sort-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.sort === sort);
+  });
   loadMedia(true);
 }
 
@@ -1183,13 +1225,14 @@ function init() {
     tab.addEventListener('click', () => selectSourceType(tab.dataset.type));
   });
 
-  const sentinel = document.getElementById('feedSentinel');
-  const observer = new IntersectionObserver(entries => {
-    if (entries[0].isIntersecting && !state.isLoading && !state.isLastPage) {
+  /* Scroll-to-top pagination: 距顶端 600px 时预加载 */
+  const feed = document.getElementById('chatFeed');
+  feed.addEventListener('scroll', () => {
+    if (state.isLoading || state.isLastPage) return;
+    if (feed.scrollTop <= 300) {
       loadMedia(false);
     }
-  }, { threshold: 0.1, rootMargin: '200px' });
-  observer.observe(sentinel);
+  });
 
   document.getElementById('searchInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') doSearch();
@@ -1197,8 +1240,9 @@ function init() {
 
   document.getElementById('searchClearBtn').addEventListener('click', clearSearch);
 
-  const sortBtn = document.getElementById('sortToggle');
-  if (sortBtn) sortBtn.addEventListener('click', switchSort);
+  qsa('.sort-btn').forEach(btn => {
+    btn.addEventListener('click', () => switchSort(btn.dataset.sort));
+  });
 
   document.getElementById('searchInput').addEventListener('input', () => {
     document.getElementById('searchClearBtn').style.display = document.getElementById('searchInput').value ? 'block' : 'none';

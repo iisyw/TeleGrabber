@@ -63,8 +63,10 @@ def save_media_groups_collection(collection=None):
                     'first_time': value['first_time'],
                     'status_message_id': value.get('status_message_id'),
                     'source_name': value.get('source_name'),
+                    'source_username': value.get('source_username'),
                     'source_id': value.get('source_id'),
-                    'source_link': value.get('source_link'),
+                    'source_link1': value.get('source_link1'),
+                    'source_link2': value.get('source_link2'),
                     'source_type': value.get('source_type'),
                     'caption': value.get('caption')
                 }
@@ -78,35 +80,31 @@ def save_media_groups_collection(collection=None):
 
 async def add_photo_to_collection(media_group_id, chat_id, user, photo, context=None, message=None):
     """将照片添加到媒体组收集中"""
-    source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
+    src = get_forward_source_info(message)
 
     if media_group_id:
         return await add_media_to_collection(
             media_group_id, chat_id, user, photo, 'photo', context, message,
-            source_name, source_id, source_link, source_type,
+            src,
             chat_type=message.chat.type if message else None,
-            orig_chat_id=orig_chat_id,
-            orig_msg_id=orig_msg_id
         )
 
 
 async def add_video_to_collection(media_group_id, chat_id, user, video, context=None, message=None):
     """将视频添加到媒体组收集中"""
-    source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id = get_forward_source_info(message)
+    src = get_forward_source_info(message)
 
     if media_group_id:
         return await add_media_to_collection(
             media_group_id, chat_id, user, video, 'video', context, message,
-            source_name, source_id, source_link, source_type,
+            src,
             chat_type=message.chat.type if message else None,
-            orig_chat_id=orig_chat_id,
-            orig_msg_id=orig_msg_id
         )
 
 
 async def add_media_to_collection(media_group_id, chat_id, user, media_obj, media_type, context=None, message=None,
-                                  source_name=None, source_id=None, source_link=None, source_type=None,
-                                  chat_type=None, orig_chat_id=None, orig_msg_id=None):
+                                  source_info=None,
+                                  chat_type=None):
     """将媒体（照片或视频）添加到媒体组收集中 (优化版：优先操作内存)。
 
     并发安全：开启 concurrent_updates 后，同一媒体组的多张图会并发进入本函数。
@@ -115,14 +113,16 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
     """
     collection_key = f"{chat_id}_{media_group_id}"
 
+    src = source_info or {}
     media_info = {
         'file_id': media_obj.file_id,
         'file_unique_id': media_obj.file_unique_id,
         'media_type': media_type,
         'message_id': message.message_id if message else None,
+        'orig_message_id': get_message_id(message) if message else None,
         'file_size': getattr(media_obj, 'file_size', 0),
-        'orig_chat_id': orig_chat_id,
-        'orig_msg_id': orig_msg_id,
+        'orig_chat_id': src.get('orig_chat_id'),
+        'orig_msg_id': src.get('orig_msg_id'),
         'message_time': utc_to_local(get_message_date(message)).isoformat() if message and message.date else None,
     }
 
@@ -139,10 +139,12 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
                 'media_items': [media_info],
                 'first_time': datetime.now().isoformat(),
                 'status_message_id': None,
-                'source_name': source_name,
-                'source_id': source_id,
-                'source_link': source_link,
-                'source_type': source_type,
+                'source_name': src.get('source_name'),
+                'source_username': src.get('source_username'),
+                'source_id': src.get('source_id'),
+                'source_link1': src.get('source_link1'),
+                'source_link2': src.get('source_link2'),
+                'source_type': src.get('source_type'),
                 'chat_type': chat_type or (message.chat.type if message else None),
                 'caption': message.caption if message else None,
                 'raw_message': message.to_dict() if message and hasattr(message, 'to_dict') else None,
@@ -365,6 +367,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
     user_id = group_info.get('user_id')
     user_obj = _stub_user({'user_id': user_id, 'user_name': user_name})
     source_name = group_info.get('source_name')
+    source_username = group_info.get('source_username')
     source_type = group_info.get('source_type')
     save_dir = get_save_directory(user_obj, source_name, source_type)
 
@@ -436,7 +439,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                     src = dup_info['source_name'] if dup_info else "本消息"
                     skipped_duplicates.append({
                         'index': index, 'filename': fname, 'source_name': src,
-                        'source_link': dup_info.get('source_link') if dup_info else "",
+                        'source_link1': dup_info.get('source_link1') if dup_info else "",
                         'caption': (dup_info.get('caption') if dup_info else '无') or '无'
                     })
                     items_status[index - 1] = 2
@@ -516,10 +519,12 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                media_type=media_info.get('media_type', 'photo'),
                                caption=media_info.get('caption') or caption,
                                source_name=source_name, source_id=group_info.get('source_id'),
-                               source_link=media_info.get('source_link') or group_info.get('source_link'),
+                               source_link1=media_info.get('source_link1') or group_info.get('source_link1'),
+                               source_link2=media_info.get('source_link2') or group_info.get('source_link2'),
+                               source_username=media_info.get('source_username') or group_info.get('source_username'),
                                source_type=source_type,
                                message_time=media_info.get('message_date') or media_info.get('message_time'),
-                               message_id=media_info.get('message_id') or media_info.get('orig_msg_id'))
+                               message_id=media_info.get('orig_message_id') or media_info.get('orig_msg_id'))
                     with progress_lock:
                         items_status[index - 1] = 1
                         media_info['status'] = 1
@@ -552,10 +557,12 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                     media_type=media_type,
                                     caption=media_info.get('caption') or caption,
                                     source_name=source_name, source_id=group_info.get('source_id'),
-                                    source_link=media_info.get('source_link') or group_info.get('source_link'),
+                                    source_link1=media_info.get('source_link1') or group_info.get('source_link1'),
+                                    source_link2=media_info.get('source_link2') or group_info.get('source_link2'),
+                                    source_username=media_info.get('source_username') or group_info.get('source_username'),
                                     source_type=source_type,
                                     message_time=media_info.get('message_date') or media_info.get('message_time'),
-                                    message_id=media_info.get('message_id') or media_info.get('orig_msg_id'))
+                                    message_id=media_info.get('orig_message_id') or media_info.get('orig_msg_id'))
             if not db_success:
                 raise Exception("元数据保存数据库失败 (可能数据库被锁定)")
 
@@ -598,8 +605,8 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
             finish_text += f"♻️ 跳过了 {len(skipped_duplicates)} 个重复资源:\n"
             for dup in skipped_duplicates:
                 source_display = dup['source_name']
-                if dup.get('source_link'):
-                    source_display = f"[{dup['source_name']}]({dup['source_link']})"
+                if dup.get('source_link1'):
+                    source_display = f"[{dup['source_name']}]({dup['source_link1']})"
                 finish_text += f" - 第{dup['index']}项 -> `{dup['filename']}` (来源: {source_display}，原标题: {dup['caption']})\n"
         failed_count = sum(1 for s in items_status if s == 3)
         if has_failed:

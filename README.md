@@ -32,7 +32,7 @@ TeleGrabber/
 ├── utils.py               # 数据库、文件检测、审计日志
 ├── user_api.py            # MTProto (User API) 下载引擎
 ├── web_backend.py         # Web 后端服务 (FastAPI)
-├── fix_metadata.py         # 元数据修复脚本（message_time / message_id / source_link）
+├── fix_metadata.py         # 元数据修复脚本（message_time / message_id / source_link1 / source_link2 / source_username）
 ├── bot/                   # 机器人逻辑 (python-telegram-bot v21, async)
 │   ├── handlers.py        # 消息处理器
 │   ├── download.py        # 下载逻辑（含进度回调）
@@ -445,9 +445,11 @@ TeleGrabber 支持以下类型的媒体：
 - Telegram 文件唯一 ID
 - 媒体组 ID (如适用)
 - 媒体类型 (photo、video、animation、document 等)
-- 来源名称 (频道名、用户名等)
+- 来源名称 (频道标题、群组名、bot 显示名等)
 - 来源 ID (频道 ID、用户 ID 等)
-- 来源链接 (t.me 格式的链接)
+- 来源用户名 (Telegram 用户名，如 `sifangktv10`)
+- 来源链接1 (优先用户名格式，如 `https://t.me/username/msg_id`)
+- 来源链接2 (数字 ID 格式，如 `https://t.me/c/id/msg_id`)
 - 来源类型 (channel、group、bot、user、private_user 等)
 
 所有元数据仅存储在 SQLite 数据库中，无额外物理备份。

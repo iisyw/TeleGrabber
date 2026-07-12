@@ -65,7 +65,9 @@ class MediaRecord(BaseModel):
     media_type: str
     caption: Optional[str]
     source_name: Optional[str]
-    source_link: Optional[str]
+    source_username: Optional[str] = None
+    source_link1: Optional[str] = None
+    source_link2: Optional[str] = None
     source_type: Optional[str]
     file_id: Optional[str] = None
     source_id: Optional[str] = None
@@ -113,8 +115,9 @@ def get_media(
         cursor = conn.cursor()
 
         query = ("SELECT id, user_id, user_name, filename, datetime, message_time, "
-                 "media_group_id, media_type, caption, source_name, source_link, source_type, "
-                 "file_unique_id, file_id, source_id, message_id, remark "
+                 "media_group_id, media_type, caption, source_name, source_id, "
+                 "source_username, source_link1, source_link2, source_type, "
+                 "file_unique_id, file_id, message_id, remark "
                  "FROM media_metadata")
         params = []
         conditions = []
@@ -160,8 +163,10 @@ def get_media(
                 id=row[0], user_id=row[1], user_name=row[2],
                 filename=row[3], datetime=row[4], message_time=row[5],
                 media_group_id=row[6], media_type=row[7], caption=row[8], source_name=row[9],
-                source_link=row[10], source_type=row[11], file_unique_id=row[12],
-                file_id=row[13], source_id=row[14], message_id=row[15], remark=row[16]
+                source_id=row[10], source_username=row[11],
+                source_link1=row[12], source_link2=row[13],
+                source_type=row[14], file_unique_id=row[15],
+                file_id=row[16], message_id=row[17], remark=row[18]
             ) for row in rows
         ]
     except Exception as e:

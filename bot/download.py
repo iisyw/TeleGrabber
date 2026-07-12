@@ -75,7 +75,7 @@ def build_progress_bar(media_items, items_status, item_progress):
     return "".join(parts)
 
 
-def save_media_metadata(user, media_info, final_filename, save_dir, media_group_id=None, fallback_link=None, message_time=None):
+def save_media_metadata(user, media_info, final_filename, save_dir, media_group_id=None, fallback_link1=None, message_time=None):
     media_obj_stub = type('Media', (), {
         'file_id': media_info['file_id'],
         'file_unique_id': media_info['file_unique_id'],
@@ -86,7 +86,9 @@ def save_media_metadata(user, media_info, final_filename, save_dir, media_group_
         media_type=media_info.get('media_type', 'photo'),
         caption=media_info.get('caption'),
         source_name=media_info.get('source_name'), source_id=media_info.get('source_id'),
-        source_link=media_info.get('source_link') or fallback_link,
+        source_link1=media_info.get('source_link1') or fallback_link1,
+        source_link2=media_info.get('source_link2'),
+        source_username=media_info.get('source_username'),
         source_type=media_info.get('source_type'),
         message_time=message_time,
         message_id=media_info.get('message_id'),
@@ -112,7 +114,6 @@ def _single_buttons(single_key, is_dup, has_failed):
 def build_single_record(media_obj, media_type, date_dir, source_info, ext_for_large,
                         chat, message, final_filename=None):
     """构造一条可脱离原始 update 复用的单张下载记录。"""
-    source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id = source_info
     return {
         'file_id': media_obj.file_id,
         'file_unique_id': media_obj.file_unique_id,
@@ -122,12 +123,14 @@ def build_single_record(media_obj, media_type, date_dir, source_info, ext_for_la
         'final_filename': final_filename,
         'caption': message.caption,
         'file_size': getattr(media_obj, 'file_size', 0) or 0,
-        'source_name': source_name,
-        'source_id': source_id,
-        'source_link': source_link,
-        'source_type': source_type,
-        'orig_chat_id': orig_chat_id,
-        'orig_msg_id': orig_msg_id,
+        'source_name': source_info['source_name'],
+        'source_id': source_info['source_id'],
+        'source_link1': source_info['source_link1'],
+        'source_link2': source_info['source_link2'],
+        'source_username': source_info['source_username'],
+        'source_type': source_info['source_type'],
+        'orig_chat_id': source_info['orig_chat_id'],
+        'orig_msg_id': source_info['orig_msg_id'],
         'chat_id': chat.id,
         'chat_type': chat.type,
         'message_id': get_message_id(message),
@@ -145,8 +148,8 @@ async def reply_duplicate(update, media_obj, media_type, caption):
 
     label = MEDIA_LABELS.get(media_type, '资源')
     source_display = dup_info.get('source_name') or '未知'
-    if dup_info.get('source_link'):
-        source_display = f"[{dup_info['source_name']}]({dup_info['source_link']})"
+    if dup_info.get('source_link1'):
+        source_display = f"[{dup_info['source_name']}]({dup_info['source_link1']})"
 
     reply_msg = (
         f"♻️ 检测到重复资源 ({label})\n\n"
@@ -279,7 +282,10 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
         _stub_user(record), media_obj_stub, final_filename,
         save_dir=date_dir, media_type=media_type, caption=record.get('caption'),
         source_name=record.get('source_name'), source_id=record.get('source_id'),
-        source_link=record.get('source_link'), source_type=source_type,
+        source_link1=record.get('source_link1'),
+        source_link2=record.get('source_link2'),
+        source_username=record.get('source_username'),
+        source_type=source_type,
         message_time=record.get('message_time'),
         message_id=record.get('link_message_id'),
     )
@@ -310,7 +316,10 @@ async def download_small_from_record(bot, record):
             _stub_user(record), media_obj_stub, final_filename,
             save_dir=date_dir, media_type=media_type, caption=record.get('caption'),
             source_name=record.get('source_name'), source_id=record.get('source_id'),
-            source_link=record.get('source_link'), source_type=record.get('source_type'),
+            source_link1=record.get('source_link1'),
+            source_link2=record.get('source_link2'),
+            source_username=record.get('source_username'),
+            source_type=record.get('source_type'),
             message_time=record.get('message_time'),
             message_id=record.get('link_message_id'),
         )
@@ -332,7 +341,6 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
 
     User API 调用是阻塞的，放到默认线程池执行，避免阻塞 PTB 事件循环。
     """
-    source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id = source_info
     message_time = utc_to_local(get_message_date(update.message)).isoformat() if update.message and update.message.date else None
 
     temp_filename = generate_temp_filename()
@@ -350,9 +358,9 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
     ) if status_message else None
 
     # 溯源：优先用原始频道/消息 ID
-    target_chat_id = orig_chat_id or chat.id
-    target_msg_id = orig_msg_id or update.message.message_id
-    if not orig_chat_id and (chat.type == 'private' or source_type in ["user", "private_user"]):
+    target_chat_id = source_info['orig_chat_id'] or chat.id
+    target_msg_id = source_info['orig_msg_id'] or update.message.message_id
+    if not source_info['orig_chat_id'] and (chat.type == 'private' or source_info['source_type'] in ["user", "private_user"]):
         target_chat_id = context.bot.username or context.bot.id
 
     success = await loop.run_in_executor(
@@ -368,7 +376,7 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
     if not success and target_chat_id != chat.id:
         logger.warning(f"大{label}溯源下载失败，尝试从本地聊天回退下载...")
         fallback_chat_id = chat.id
-        if chat.type == 'private' or source_type in ["user", "private_user"]:
+        if chat.type == 'private' or source_info['source_type'] in ["user", "private_user"]:
             fallback_chat_id = context.bot.username or context.bot.id
         success = await loop.run_in_executor(
             None,
@@ -385,7 +393,9 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
     save_to_db(
         update.effective_user, media_obj, final_filename,
         save_dir=date_dir, media_type=media_type, caption=update.message.caption,
-            source_name=source_name, source_id=source_id, source_link=source_link, source_type=source_type,
+        source_name=source_info['source_name'], source_id=source_info['source_id'],
+        source_link1=source_info['source_link1'], source_link2=source_info['source_link2'],
+        source_username=source_info['source_username'], source_type=source_info['source_type'],
         message_time=message_time,
         message_id=get_message_id(update.message),
     )
@@ -398,7 +408,6 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
     v21 中 get_file() 与 file.download_to_drive() 均为协程。
     detect_ext 与 save_to_db 是同步的轻量操作，直接调用即可。
     """
-    source_name, source_id, source_link, source_type, _, _ = source_info
     message_time = utc_to_local(get_message_date(update.message)).isoformat() if update.message and update.message.date else None
 
     temp_filename = generate_temp_filename()
@@ -416,7 +425,9 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
         save_to_db(
             update.effective_user, media_obj, final_filename,
             save_dir=date_dir, media_type=media_type, caption=update.message.caption,
-        source_name=source_name, source_id=source_id, source_link=source_link, source_type=source_type,
+            source_name=source_info['source_name'], source_id=source_info['source_id'],
+            source_link1=source_info['source_link1'], source_link2=source_info['source_link2'],
+            source_username=source_info['source_username'], source_type=source_info['source_type'],
             message_time=message_time,
             message_id=get_message_id(update.message),
         )

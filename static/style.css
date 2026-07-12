@@ -257,7 +257,12 @@ body {
   margin-top: 1px;
 }
 
-.top-bar-actions { flex-shrink: 0; }
+.top-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
 
 .search-box {
   display: flex;
@@ -303,9 +308,41 @@ body {
 }
 
 .search-clear:hover { color: var(--text); }
-.sort-toggle { flex-shrink: 0; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
-.sort-toggle:hover { color: var(--accent); background: var(--bg-hover); }
-.sort-toggle.active { color: var(--accent); }
+.sort-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.sort-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.sort-buttons {
+  display: flex;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--divider);
+}
+.sort-btn {
+  background: none;
+  border: none;
+  font-size: 11px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--text-muted);
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition);
+}
+.sort-btn:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
+}
+.sort-btn.active {
+  color: var(--accent);
+  background: rgba(0,120,215,.12);
+}
 
 /* ─── Chat Feed ─── */
 .chat-feed {
@@ -817,6 +854,10 @@ body {
 
 .modal-meta .meta-item { margin-bottom: 3px; }
 .modal-meta .meta-label { color: var(--text-secondary); }
+.modal-meta .meta-divider { border-top: 1px solid #fff; margin: 8px 0; opacity: 0.3; }
+.modal-meta .meta-toggle { cursor: pointer; color: var(--accent); font-size: 12px; margin: 4px 0; user-select: none; }
+.modal-meta .meta-toggle:hover { text-decoration: underline; }
+.modal-meta .meta-hidden { display: none; }
 
 .modal-actions {
   margin-top: auto;

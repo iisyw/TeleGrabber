@@ -62,64 +62,78 @@ def get_forward_source_info(message):
       - MessageOriginHiddenUser (.sender_user_name)
 
     Returns:
-        tuple: (source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id)
+        dict: {source_name, source_username, source_id, source_link1, source_link2,
+               source_type, orig_chat_id, orig_msg_id}
     """
     import re
 
-    source_name = None
-    source_id = None
-    source_link = None
-    source_type = "unknown"
-    orig_chat_id = None
-    orig_msg_id = None
+    info = {
+        'source_name': None,
+        'source_username': None,
+        'source_id': None,
+        'source_link1': None,
+        'source_link2': None,
+        'source_type': "unknown",
+        'orig_chat_id': None,
+        'orig_msg_id': None,
+    }
 
     origin = getattr(message, 'forward_origin', None)
     origin_type = getattr(origin, 'type', None) if origin else None
 
     if origin_type == "channel":
         chat = origin.chat
-        source_name = chat.title or f"chat_{chat.id}"
-        source_id = str(chat.id)
-        source_type = "channel"
-        orig_chat_id = chat.id
-        orig_msg_id = getattr(origin, 'message_id', None)
+        info['source_name'] = chat.title or f"chat_{chat.id}"
+        info['source_id'] = str(chat.id)
+        info['source_type'] = "channel"
+        info['orig_chat_id'] = chat.id
+        info['orig_msg_id'] = getattr(origin, 'message_id', None)
         if chat.username:
-            source_link = f"https://t.me/{chat.username}/{orig_msg_id}"
+            info['source_username'] = chat.username
+            info['source_link1'] = f"https://t.me/{chat.username}/{info['orig_msg_id']}"
+            info['source_link2'] = f"https://t.me/c/{chat.id}/{info['orig_msg_id']}"
         else:
-            source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}/{orig_msg_id}"
+            info['source_link1'] = f"https://t.me/c/{chat.id}/{info['orig_msg_id']}"
+            info['source_link2'] = ''
 
     elif origin_type == "chat":
         chat = origin.sender_chat
-        source_name = chat.title or f"chat_{chat.id}"
-        source_id = str(chat.id)
-        source_type = "group"
-        orig_chat_id = chat.id
+        info['source_name'] = chat.title or f"chat_{chat.id}"
+        info['source_id'] = str(chat.id)
+        info['source_type'] = "group"
+        info['orig_chat_id'] = chat.id
         if chat.username:
-            source_link = f"https://t.me/{chat.username}"
+            info['source_username'] = chat.username
+            info['source_link1'] = f"https://t.me/{chat.username}"
+            info['source_link2'] = f"https://t.me/c/{chat.id}"
         else:
-            source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}"
+            info['source_link1'] = f"https://t.me/c/{chat.id}"
+            info['source_link2'] = ''
 
     elif origin_type == "user":
         user_from = origin.sender_user
-        source_id = str(user_from.id)
-        orig_chat_id = user_from.id
+        info['source_id'] = str(user_from.id)
+        info['orig_chat_id'] = user_from.id
         is_bot = getattr(user_from, 'is_bot', False)
         if is_bot:
-            source_type = "bot"
-            source_name = user_from.first_name or f"bot_{user_from.id}"
+            info['source_type'] = "bot"
+            info['source_name'] = user_from.first_name or f"bot_{user_from.id}"
         else:
-            source_type = "private_user"
-            source_name = user_from.username or user_from.first_name or f"user_{user_from.id}"
+            info['source_type'] = "private_user"
+            info['source_name'] = user_from.username or user_from.first_name or f"user_{user_from.id}"
         if user_from.username:
-            source_link = f"https://t.me/{user_from.username}"
+            info['source_username'] = user_from.username
+            info['source_link1'] = f"https://t.me/{user_from.username}"
+            info['source_link2'] = ''
 
     elif origin_type == "hidden_user":
-        source_name = getattr(origin, 'sender_user_name', None) or "hidden_user"
-        source_id = "unknown"
-        source_link = ""
-        source_type = "private_user"
+        info['source_name'] = getattr(origin, 'sender_user_name', None) or "hidden_user"
+        info['source_id'] = "unknown"
+        info['source_link1'] = ''
+        info['source_link2'] = ''
+        info['source_type'] = "private_user"
 
-    if source_name:
-        source_name = re.sub(r'[\\/*?:"<>|]', "_", source_name)
+    if info['source_name']:
+        info['source_name'] = re.sub(r'[\\/*?:"<>|]', "_", info['source_name'])
 
-    return source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id
+    return info

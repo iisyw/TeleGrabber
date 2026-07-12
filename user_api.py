@@ -227,9 +227,14 @@ def _message_media_info(message):
     chat = message.chat
     source_name = getattr(chat, 'title', None) or getattr(chat, 'username', None) or getattr(chat, 'first_name', None) or str(getattr(chat, 'id', 'unknown'))
     source_name = re.sub(r'[\\/*?:"<>|]', "_", source_name)
-    source_link = getattr(message, 'link', None)
-    if not source_link and getattr(chat, 'username', None):
-        source_link = f"https://t.me/{chat.username}/{message.id}"
+    source_username = getattr(chat, 'username', None) or ''
+    source_link1 = getattr(message, 'link', None)
+    if not source_link1 and source_username:
+        source_link1 = f"https://t.me/{source_username}/{message.id}"
+    if getattr(chat, 'id', None):
+        source_link2 = f"https://t.me/c/{chat.id}/{message.id}"
+    else:
+        source_link2 = ''
 
     # 若 document 实际是视频源文件，归类为 video 以便 Web 端正确展示，
     # 但仍下载原始 document 对象（is_source_file 标记真实大小来源）。
@@ -255,8 +260,10 @@ def _message_media_info(message):
         'caption': message.caption or '',
         'ext': ext,
         'source_name': source_name,
+        'source_username': source_username,
         'source_id': str(getattr(chat, 'id', '')),
-        'source_link': source_link,
+        'source_link1': source_link1,
+        'source_link2': source_link2,
         'source_type': _enum_value(getattr(chat, 'type', None)),
         'media_group_id': str(getattr(message, 'media_group_id', '') or ''),
         'message_id': message.id,

@@ -113,13 +113,13 @@ async def backfill_phase1():
     从 source_link 中提取 (chat_id, msg_id)，
     用 Pyrogram 获取消息对象，回填 message_time、message_id、source_link。
     """
-    # 查出所有缺 message_time 且有 source_link 的记录
+    # 查出所有缺 message_time 且有 source_link1 的记录
     with _db_lock:
         conn = get_db()
         try:
             rows = conn.execute(
-                "SELECT id, source_link FROM media_metadata "
-                "WHERE message_time IS NULL AND source_link != ''"
+                "SELECT id, source_link1 FROM media_metadata "
+                "WHERE message_time IS NULL AND source_link1 != ''"
             ).fetchall()
         finally:
             conn.close()
@@ -127,15 +127,15 @@ async def backfill_phase1():
     if not rows:
         print("Phase 1: 无待处理记录"); return
 
-    print(f"Phase 1: {len(rows)} 条 — 从 source_link 提取的 msg_id 获取 message_time")
+    print(f"Phase 1: {len(rows)} 条 — 从 source_link1 提取的 msg_id 获取 message_time")
 
     # 创建 Pyrogram 客户端（用你的用户账号访问频道）
     client = await _make_client()
     updated = 0
 
-    for record_id, source_link in rows:
+    for record_id, source_link1 in rows:
         # 从链接中提取 chat_id 和 msg_id
-        parsed = parse_source_link(source_link)
+        parsed = parse_source_link(source_link1)
         if not parsed:          # 链接格式不匹配
             continue
 
@@ -153,27 +153,30 @@ async def backfill_phase1():
             # 消息 ID：用 msg.id（我们按 source_link 的 msg_id 查到的就是这个消息本身）
             msg_id_val = msg.id
 
-            # 重构 source_link（规范化，方便前端跳转）
-            # 举例: t.me/c/1812716119/123 → t.me/sifangktv10/123（有用户名时）
+            # 重构 source_link1/source_link2（规范化，方便前端跳转）
             chat = msg.chat
+            new_link1 = None
+            new_link2 = None
             if chat:
                 username = getattr(chat, 'username', None)
                 cid = getattr(chat, 'id', None)
                 link_msg_id = msg_id_val
                 if username:
-                    # 有用户名的频道：t.me/频道名/msg_id
-                    new_link = f"https://t.me/{username}/{link_msg_id}"
+                    # 有用户名的频道：source_link1 用用户名格式，source_link2 用数字格式
+                    new_link1 = f"https://t.me/{username}/{link_msg_id}"
+                    new_link2 = f"https://t.me/c/{cid}/{link_msg_id}"
                 elif cid:
-                    # 无用户名的频道：t.me/c/去掉-100的ID/msg_id
-                    new_link = f"https://t.me/c/{str(cid).replace('-100', '')}/{link_msg_id}"
-                else:
-                    new_link = None
+                    # 无用户名的频道
+                    new_link1 = f"https://t.me/c/{cid}/{link_msg_id}"
+                    new_link2 = ''
 
             # 回填数据库
             update_record(record_id,
                 message_time=msg_time,
                 message_id=msg_id_val,
-                source_link=new_link or source_link,   # 新链接或保留原链接
+                source_link1=new_link1 or source_link1,
+                source_link2=new_link2 or '',
+                source_username=getattr(chat, 'username', None) if chat else '',
                 source_type=_enum_value(getattr(chat, 'type', None)) if chat else '',
             )
             updated += 1
@@ -197,14 +200,14 @@ def backfill_phase2():
     with _db_lock:
         conn = get_db()
         rows = conn.execute(
-            "SELECT id, source_link FROM media_metadata "
-            "WHERE message_id IS NULL AND source_link != ''"
+            "SELECT id, source_link1 FROM media_metadata "
+            "WHERE message_id IS NULL AND source_link1 != ''"
         ).fetchall()
         conn.close()
 
     updated = 0
-    for record_id, source_link in rows:
-        mid = extract_msg_id_from_source_link(source_link)
+    for record_id, source_link1 in rows:
+        mid = extract_msg_id_from_source_link(source_link1)
         if mid is not None:
             update_record(record_id, message_id=mid)
             updated += 1
@@ -231,24 +234,28 @@ def backfill_phase3():
     with _db_lock:
         conn = get_db()
         rows = conn.execute(
-            "SELECT id, source_link, source_id, message_id, source_type "
+            "SELECT id, source_link1, source_link2, source_id, message_id, source_type "
             "FROM media_metadata "
-            "WHERE source_type = 'channel' AND message_id IS NOT NULL AND source_link != ''"
+            "WHERE source_type = 'channel' AND message_id IS NOT NULL AND (source_link1 != '' OR source_link2 != '')"
         ).fetchall()
         conn.close()
 
     updated = 0
-    for record_id, source_link, source_id, msg_id, st in rows:
-        # 如果链接末尾已有 /数字（如 t.me/xxx/123），跳过
-        if re.search(r'/\d+$', source_link):
+    for record_id, source_link1, source_link2, source_id, msg_id, st in rows:
+        # 如果 source_link1 末尾已有 /数字（如 t.me/xxx/123），跳过
+        if source_link1 and re.search(r'/\d+$', source_link1):
+            continue
+        # 如果 source_link2 末尾已有 /数字，跳过
+        if source_link2 and re.search(r'/\d+$', source_link2):
             continue
 
         # 构造新链接：原链接 + /message_id
-        new_link = f"{source_link}/{msg_id}"
-        update_record(record_id, source_link=new_link)
+        new_link1 = f"{source_link1}/{msg_id}" if source_link1 else ''
+        new_link2 = f"{source_link2}/{msg_id}" if source_link2 else ''
+        update_record(record_id, source_link1=new_link1, source_link2=new_link2)
         updated += 1
 
-    print(f"Phase 3: source_link 追加 msg_id: {updated} 条\n")
+    print(f"Phase 3: source_link1/source_link2 追加 msg_id: {updated} 条\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -425,6 +432,47 @@ async def backfill_phase4():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Phase 5: 回填 source_username + source_link2（纯 SQL，零网络）
+#
+# 从 source_link1 提取用户名，从 source_id+message_id 构造 source_link2
+# ═══════════════════════════════════════════════════════════════════════
+
+def backfill_phase5():
+    """回填 source_username 和 source_link2。"""
+    with _db_lock:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT id, source_link1, source_id, message_id, source_username, source_link2 "
+            "FROM media_metadata "
+            "WHERE source_username IS NULL OR source_username = '' OR source_link2 IS NULL OR source_link2 = ''"
+        ).fetchall()
+        conn.close()
+
+    updated_username = 0
+    updated_link2 = 0
+    for record_id, source_link1, source_id, msg_id, cur_username, cur_link2 in rows:
+        kwargs = {}
+        # 回填 source_username：从 source_link1 提取（格式: https://t.me/username/...）
+        if not cur_username and source_link1:
+            m = re.match(r'https://t\.me/([^/]+)/', source_link1)
+            if m and m.group(1) != 'c':
+                kwargs['source_username'] = m.group(1)
+                updated_username += 1
+        # 回填 source_link2：从 source_id + message_id 构造
+        if not cur_link2 and source_id and msg_id is not None:
+            if source_link1:
+                kwargs['source_link2'] = f"https://t.me/c/{source_id}/{msg_id}"
+            else:
+                kwargs['source_link1'] = f"https://t.me/c/{source_id}/{msg_id}"
+                kwargs['source_link2'] = ''
+            updated_link2 += 1
+        if kwargs:
+            update_record(record_id, **kwargs)
+
+    print(f"Phase 5: 回填 source_username: {updated_username} 条, source_link2: {updated_link2} 条\n")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -441,6 +489,7 @@ async def main():
     backfill_phase2()        # 从 source_link 截取 msg_id（纯 SQL，补漏）
     await backfill_phase4()  # 扫聊天记录，file_unique_id + file_size 双重匹配
     backfill_phase3()        # Phase 4 新填的 message_id 也写回 source_link
+    backfill_phase5()        # 回填 source_username + source_link2
     print("全部完成")
 
 
