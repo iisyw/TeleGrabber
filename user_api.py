@@ -11,6 +11,7 @@ import threading
 import mimetypes
 import re
 from urllib.parse import urlparse
+from datetime import timezone
 
 # --- 全局状态 ---
 _app = None
@@ -30,7 +31,6 @@ def _get_proxy_dict():
     if not PROXY:
         return None
     try:
-        from urllib.parse import urlparse
         parsed = urlparse(PROXY)
         # Pyrogram 内部使用 PySocks，对于 socks5h 我们映射到 socks5，
         # 并通过传递 hostname 让其在远程（代理端）进行 DNS 解析。
@@ -225,8 +225,8 @@ def _message_media_info(message):
             ext = defaults.get(media_type, '.bin')
 
     chat = message.chat
-    source = getattr(chat, 'title', None) or getattr(chat, 'username', None) or getattr(chat, 'first_name', None) or str(getattr(chat, 'id', 'unknown'))
-    source = re.sub(r'[\\/*?:"<>|]', "_", source)
+    source_name = getattr(chat, 'title', None) or getattr(chat, 'username', None) or getattr(chat, 'first_name', None) or str(getattr(chat, 'id', 'unknown'))
+    source_name = re.sub(r'[\\/*?:"<>|]', "_", source_name)
     source_link = getattr(message, 'link', None)
     if not source_link and getattr(chat, 'username', None):
         source_link = f"https://t.me/{chat.username}/{message.id}"
@@ -240,6 +240,11 @@ def _message_media_info(message):
         elif mime_type.startswith('image/'):
             stored_media_type = 'photo'
 
+    # 获取原始消息时间（转发消息使用原消息时间），转为本地时间
+    msg_date = message.forward_date or message.date
+    if msg_date:
+        msg_date = msg_date.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+
     return {
         'message': message,
         'media_type': stored_media_type,
@@ -249,12 +254,13 @@ def _message_media_info(message):
         'is_source_file': is_source_file,
         'caption': message.caption or '',
         'ext': ext,
-        'source': source,
+        'source_name': source_name,
         'source_id': str(getattr(chat, 'id', '')),
         'source_link': source_link,
         'source_type': _enum_value(getattr(chat, 'type', None)),
         'media_group_id': str(getattr(message, 'media_group_id', '') or ''),
         'message_id': message.id,
+        'message_date': msg_date.isoformat() if msg_date else None,
     }
 
 
@@ -562,3 +568,17 @@ def stop_user_api():
             logger.info("User API 客户端已安全停止")
         except Exception as e:
             logger.error(f"停止 User API 客户端失败: {e}")
+
+
+async def build_pyrogram_client():
+    """为一次性脚本（如回填）创建独立的 Client 实例，不走单例。"""
+    app = Client(
+        "telegrabber_user",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        proxy=_get_proxy_dict(),
+        workdir=DATA_DIR,
+        sleep_threshold=60,
+    )
+    await app.start()
+    return app

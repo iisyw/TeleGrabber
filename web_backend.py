@@ -60,12 +60,17 @@ class MediaRecord(BaseModel):
     user_name: Optional[str]
     filename: str
     datetime: str
+    message_time: Optional[str]
     media_group_id: Optional[str]
     media_type: str
     caption: Optional[str]
-    source: Optional[str]
+    source_name: Optional[str]
     source_link: Optional[str]
     source_type: Optional[str]
+    file_id: Optional[str] = None
+    source_id: Optional[str] = None
+    message_id: Optional[int] = None
+    remark: Optional[str] = None
 
 # 媒体文件映射 (用于预览下载的内容)
 if not os.path.exists(SAVE_DIR):
@@ -97,25 +102,30 @@ def get_media(
     limit: int = 30, 
     offset: int = 0, 
     search: Optional[str] = None,
-    source: Optional[str] = None,
-    media_group_id: Optional[str] = None
+    source_name: Optional[str] = None,
+    source_type: Optional[str] = None,
+    media_group_id: Optional[str] = None,
+    sort: Optional[str] = "message_time",
 ):
-    """获取媒体记录列表"""
+    """获取媒体记录列表，支持按原始消息时间(message_time)或下载时间(datetime)排序"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        query = "SELECT id, user_id, user_name, filename, datetime, media_group_id, media_type, caption, source, source_link, source_type, file_unique_id FROM media_metadata"
+
+        query = ("SELECT id, user_id, user_name, filename, datetime, message_time, "
+                 "media_group_id, media_type, caption, source_name, source_link, source_type, "
+                 "file_unique_id, file_id, source_id, message_id, remark "
+                 "FROM media_metadata")
         params = []
         conditions = []
-        
+
         if search:
             conditions.append("(caption LIKE ? OR filename LIKE ?)")
             params.extend([f"%{search}%", f"%{search}%"])
-        
-        if source:
-            conditions.append("source = ?")
-            params.append(source)
+
+        if source_name:
+            conditions.append("source_name = ?")
+            params.append(source_name)
 
         if media_group_id:
             if media_group_id == "single":
@@ -123,23 +133,35 @@ def get_media(
             else:
                 conditions.append("media_group_id = ?")
                 params.append(media_group_id)
-            
+
+        if source_type:
+            conditions.append("source_type = ?")
+            params.append(source_type)
+
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-            
-        query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+
+        # 默认 message_time DESC（原始消息时间），可切 datetime DESC（下载时间）
+        if sort == "datetime":
+            query += " ORDER BY id DESC"  # datetime 和 id DESC 基本等价（下载顺序）
+        else:
+            # 按 COALESCE(message_time, datetime) 排序，空的排后面
+            query += " ORDER BY COALESCE(message_time, datetime) DESC, id DESC"
+
+        query += " LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        
+
         cursor.execute(query, params)
         rows = cursor.fetchall()
         conn.close()
-        
+
         return [
             MediaRecord(
-                id=row[0], user_id=row[1], user_name=row[2], 
-                filename=row[3], datetime=row[4], media_group_id=row[5],
-                media_type=row[6], caption=row[7], source=row[8],
-                source_link=row[9], source_type=row[10], file_unique_id=row[11]
+                id=row[0], user_id=row[1], user_name=row[2],
+                filename=row[3], datetime=row[4], message_time=row[5],
+                media_group_id=row[6], media_type=row[7], caption=row[8], source_name=row[9],
+                source_link=row[10], source_type=row[11], file_unique_id=row[12],
+                file_id=row[13], source_id=row[14], message_id=row[15], remark=row[16]
             ) for row in rows
         ]
     except Exception as e:
@@ -147,16 +169,16 @@ def get_media(
         raise HTTPException(status_code=500, detail="获取媒体记录失败")
 
 @app.get("/api/media_groups")
-def get_media_groups(source: Optional[str] = None):
+def get_media_groups(source_name: Optional[str] = None):
     """获取指定来源下的所有媒体组ID"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         query = "SELECT DISTINCT media_group_id FROM media_metadata"
         params = []
-        if source:
-            query += " WHERE source = ?"
-            params.append(source)
+        if source_name:
+            query += " WHERE source_name = ?"
+            params.append(source_name)
         
         cursor.execute(query, params)
         groups = [row[0] for row in cursor.fetchall() if row[0] and row[0] != 'single']
@@ -167,15 +189,20 @@ def get_media_groups(source: Optional[str] = None):
         raise HTTPException(status_code=500, detail="获取媒体组失败")
 
 @app.get("/api/sources")
-def get_sources():
-    """获取所有来源渠道列表"""
+def get_sources(source_type: Optional[str] = None):
+    """获取所有来源渠道列表，可选按 source_type 过滤"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT source FROM media_metadata WHERE source IS NOT NULL AND source != ''")
-        sources = [row[0] for row in cursor.fetchall()]
+        query = "SELECT DISTINCT source_name, source_type FROM media_metadata WHERE source_name IS NOT NULL AND source_name != ''"
+        params = []
+        if source_type:
+            query += " AND source_type = ?"
+            params.append(source_type)
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
         conn.close()
-        return sources
+        return [{"source_name": row[0], "source_type": row[1]} for row in rows]
     except Exception as e:
         logger.error(f"获取来源列表失败: {e}")
         raise HTTPException(status_code=500, detail="获取来源列表失败")
@@ -183,24 +210,31 @@ def get_sources():
 @app.get("/api/stats")
 def get_stats(
     search: Optional[str] = None,
-    source: Optional[str] = None,
+    source_name: Optional[str] = None,
+    source_type: Optional[str] = None,
     media_group_id: Optional[str] = None,
 ):
     """获取媒体统计信息。支持与 /api/media 相同的筛选参数，
-    用于前端显示"当前筛选条件下的数量"。"""
+    返回媒体数和消息数。"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        query = "SELECT COUNT(*) FROM media_metadata"
+        query = ("SELECT COUNT(*), "
+                 "COUNT(DISTINCT CASE WHEN media_group_id IS NOT NULL AND media_group_id != '' AND media_group_id != 'single' "
+                 "THEN media_group_id ELSE 'msg_' || id END) "
+                 "FROM media_metadata")
         params = []
         conditions = []
         if search:
             conditions.append("(caption LIKE ? OR filename LIKE ?)")
             params.extend([f"%{search}%", f"%{search}%"])
-        if source:
-            conditions.append("source = ?")
-            params.append(source)
+        if source_name:
+            conditions.append("source_name = ?")
+            params.append(source_name)
+        if source_type:
+            conditions.append("source_type = ?")
+            params.append(source_type)
         if media_group_id:
             if media_group_id == "single":
                 conditions.append("(media_group_id IS NULL OR media_group_id = '' OR media_group_id = 'single')")
@@ -211,10 +245,9 @@ def get_stats(
             query += " WHERE " + " AND ".join(conditions)
 
         cursor.execute(query, params)
-        count = cursor.fetchone()[0]
+        row = cursor.fetchone()
         conn.close()
-        # filtered 表示是否带了筛选条件，供前端区分文案
-        return {"total_count": count, "filtered": bool(conditions)}
+        return {"total_count": row[0], "message_count": row[1], "filtered": bool(conditions), "current_user_id": None}
     except Exception as e:
         logger.error(f"获取统计信息失败: {e}")
         raise HTTPException(status_code=500, detail="获取统计信息失败")

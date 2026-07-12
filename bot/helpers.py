@@ -62,11 +62,11 @@ def get_forward_source_info(message):
       - MessageOriginHiddenUser (.sender_user_name)
 
     Returns:
-        tuple: (source, source_id, source_link, source_type, orig_chat_id, orig_msg_id)
+        tuple: (source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id)
     """
     import re
 
-    source = None
+    source_name = None
     source_id = None
     source_link = None
     source_type = "unknown"
@@ -77,22 +77,20 @@ def get_forward_source_info(message):
     origin_type = getattr(origin, 'type', None) if origin else None
 
     if origin_type == "channel":
-        # 频道：origin.chat 是频道，origin.message_id 是原消息 ID
         chat = origin.chat
-        source = chat.title or f"chat_{chat.id}"
+        source_name = chat.title or f"chat_{chat.id}"
         source_id = str(chat.id)
         source_type = "channel"
         orig_chat_id = chat.id
         orig_msg_id = getattr(origin, 'message_id', None)
         if chat.username:
-            source_link = f"https://t.me/{chat.username}"
+            source_link = f"https://t.me/{chat.username}/{orig_msg_id}"
         else:
-            source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}"
+            source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}/{orig_msg_id}"
 
     elif origin_type == "chat":
-        # 群组代发：origin.sender_chat
         chat = origin.sender_chat
-        source = chat.title or f"chat_{chat.id}"
+        source_name = chat.title or f"chat_{chat.id}"
         source_id = str(chat.id)
         source_type = "group"
         orig_chat_id = chat.id
@@ -102,28 +100,26 @@ def get_forward_source_info(message):
             source_link = f"https://t.me/c/{str(chat.id).replace('-100', '')}"
 
     elif origin_type == "user":
-        # 已知用户
         user_from = origin.sender_user
         source_id = str(user_from.id)
         orig_chat_id = user_from.id
         is_bot = getattr(user_from, 'is_bot', False)
         if is_bot:
             source_type = "bot"
-            source = user_from.first_name or f"bot_{user_from.id}"
+            source_name = user_from.first_name or f"bot_{user_from.id}"
         else:
-            source_type = "user"
-            source = user_from.username or user_from.first_name or f"user_{user_from.id}"
+            source_type = "private_user"
+            source_name = user_from.username or user_from.first_name or f"user_{user_from.id}"
         if user_from.username:
             source_link = f"https://t.me/{user_from.username}"
 
     elif origin_type == "hidden_user":
-        # 隐藏用户：只有名字
-        source = getattr(origin, 'sender_user_name', None) or "hidden_user"
+        source_name = getattr(origin, 'sender_user_name', None) or "hidden_user"
         source_id = "unknown"
         source_link = ""
         source_type = "private_user"
 
-    if source:
-        source = re.sub(r'[\\/*?:"<>|]', "_", source)
+    if source_name:
+        source_name = re.sub(r'[\\/*?:"<>|]', "_", source_name)
 
-    return source, source_id, source_link, source_type, orig_chat_id, orig_msg_id
+    return source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id

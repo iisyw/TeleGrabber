@@ -51,6 +51,7 @@ else:
 
 # Telegram机器人配置
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+BOT_ID = int(TOKEN.split(':')[0]) if TOKEN and ':' in TOKEN else None
 SAVE_DIR = os.getenv('SAVE_DIR', 'downloads')
 PROXY = os.getenv('PROXY_URL')  # 可选的代理设置
 TIMEOUT = int(os.getenv('CONNECTION_TIMEOUT', '30'))  # 连接超时设置，默认30秒
@@ -84,7 +85,7 @@ else:
 ALLOWED_FILE_EXTENSIONS_STR = os.getenv('ALLOWED_FILE_EXTENSIONS', '.zip,.rar,.7z,.apk,.tar,.gz,.tgz,.pdf,.doc,.docx,.xls,.xlsx,.exe,.iso')
 ALLOWED_FILE_EXTENSIONS = [ext.strip().lower() for ext in ALLOWED_FILE_EXTENSIONS_STR.split(',') if ext.strip()]
 
-# 审计日志：记录每条收到的消息的源信息和原始数据到 audit.jsonl，方便分析
+# 审计日志：记录每条收到的消息的源信息和原始数据到 audit_{source_type}.json，方便分析
 AUDIT_LOG = os.getenv('AUDIT_LOG', 'true').lower() in ('true', '1', 'yes')
 
 # GitHub仓库地址

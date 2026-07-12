@@ -24,6 +24,8 @@ downloads/
 
 # SQLite 数据库
 *.db
+*.db-shm
+*.db-wal
 
 # 审计日志
-data/audit.jsonl
+data/audit*.json

@@ -4,9 +4,8 @@
 import os
 import time
 import errno
-import csv
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import mimetypes
 import re
@@ -18,26 +17,45 @@ from config import SAVE_DIR, DATA_DIR, AUDIT_LOG
 
 logger = logging.getLogger(__name__)
 
-def get_save_directory(user, source=None, source_type=None):
+
+def get_message_date(message):
+    """从 PTB Message 对象获取原始消息时间（转发消息使用原消息时间）"""
+    if message.forward_origin and message.forward_origin.date:
+        return message.forward_origin.date
+    return message.date
+
+
+def get_message_id(message):
+    """从 PTB Message 对象获取原始消息 ID（转发消息使用原消息 ID），没有则返回 None"""
+    if message.forward_origin:
+        return getattr(message.forward_origin, 'message_id', None)
+    return None
+
+
+def utc_to_local(dt):
+    """将 naive UTC datetime 转为本地 naive datetime"""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+
+
+def get_save_directory(user, source_name=None, source_type=None):
     """创建并返回保存目录路径 (统一媒体库版)
     
     Args:
         user: Telegram用户对象
-        source: 可选的来源信息
+        source_name: 可选的来源名称
         source_type: 可选的来源类型
         
     Returns:
         str: 保存目录的完整路径
     """
-    # 如果没有来源信息，统一存放在 unsorted 目录
-    if not source:
+    if not source_name:
         source_dir = os.path.join(SAVE_DIR, "unsorted")
     elif source_type in ["user", "private_user", "unknown_forward"]:
-        # 用户来源统一放在 direct_messages 目录
-        source_dir = os.path.join(SAVE_DIR, "direct_messages", source)
+        source_dir = os.path.join(SAVE_DIR, "direct_messages", source_name)
     else:
-        # 频道、群组等，直接在 downloads 下创建来源文件夹
-        source_dir = os.path.join(SAVE_DIR, source)
+        source_dir = os.path.join(SAVE_DIR, source_name)
     
     # 确保目录存在
     # 重试处理 ESTALE (Stale file handle) — Docker overlay 文件系统常见问题
@@ -153,7 +171,7 @@ def generate_temp_filename(media_group_id=None):
 DB_PATH = os.path.join(DATA_DIR, "telegrabber.db")
 
 def init_db():
-    """初始化数据库 (含用户信息字段)"""
+    """初始化数据库"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -168,13 +186,60 @@ def init_db():
             media_group_id TEXT,
             media_type TEXT,
             caption TEXT,
-            source TEXT,
+            source_name TEXT,
             source_id TEXT,
             source_link TEXT,
-            source_type TEXT
+            source_type TEXT,
+            message_time TEXT,
+            message_id INTEGER,
+            remark TEXT DEFAULT ''
         )
     ''')
+    # 迁移 source → source_name
+    try:
+        cursor.execute("ALTER TABLE media_metadata RENAME COLUMN source TO source_name")
+    except sqlite3.OperationalError:
+        pass
+    # 为已有数据库添加缺失的列
+    for col in ['message_time', 'message_id', 'remark']:
+        try:
+            if col == 'message_time':
+                cursor.execute("ALTER TABLE media_metadata ADD COLUMN message_time TEXT")
+            elif col == 'message_id':
+                cursor.execute("ALTER TABLE media_metadata ADD COLUMN message_id INTEGER")
+            else:
+                cursor.execute("ALTER TABLE media_metadata ADD COLUMN remark TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
     cursor.execute('PRAGMA journal_mode=WAL')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS _schema_docs (
+            table_name TEXT,
+            column_name TEXT,
+            description TEXT,
+            PRIMARY KEY (table_name, column_name)
+        )
+    ''')
+    cursor.executemany('INSERT OR IGNORE INTO _schema_docs (table_name, column_name, description) VALUES (?, ?, ?)', [
+        ('media_metadata', 'id', '自增主键'),
+        ('media_metadata', 'user_id', '储存者的 Telegram 用户 ID（转发消息到 bot 的人）'),
+        ('media_metadata', 'user_name', '储存者的 Telegram 用户名'),
+        ('media_metadata', 'filename', '本地文件名（含扩展名）'),
+        ('media_metadata', 'datetime', '下载完成时间（本地时间）'),
+        ('media_metadata', 'file_id', 'Telegram file_id，可用于重新下载'),
+        ('media_metadata', 'file_unique_id', 'Telegram 文件唯一标识，用于去重'),
+        ('media_metadata', 'media_group_id', '媒体组 ID（相册）'),
+        ('media_metadata', 'media_type', '媒体类型：photo/video/document/audio/animation'),
+        ('media_metadata', 'caption', '原始文案'),
+        ('media_metadata', 'source_name', '来源名称（原始发送者的频道标题/群组名/用户名/bot名）'),
+        ('media_metadata', 'source_id', '来源 ID（原始发送者的 chat_id）'),
+        ('media_metadata', 'source_link', '来源链接（频道含 message_id 指向具体消息，群组/用户仅来源主页）'),
+        ('media_metadata', 'source_type', '来源类型：channel/bot/group/private_user（原始发送者类型）'),
+        ('media_metadata', 'message_time', '原始消息时间（本地时间，转发时取原消息时间）'),
+        ('media_metadata', 'message_id', '原始消息 ID（转发时取原消息 ID）'),
+        ('media_metadata', 'remark', '备注（如受保护内容无法下载等）'),
+    ])
     conn.commit()
     conn.close()
 
@@ -211,7 +276,7 @@ def get_duplicate_info(file_unique_id):
         try:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT filename, source, caption, source_link FROM media_metadata WHERE file_unique_id = ?
+                SELECT filename, source_name, caption, source_link FROM media_metadata WHERE file_unique_id = ?
             ''', (file_unique_id,))
             row = cursor.fetchone()
         finally:
@@ -220,7 +285,7 @@ def get_duplicate_info(file_unique_id):
     if row:
         return {
             'filename': row[0],
-            'source': row[1],
+            'source_name': row[1],
             'caption': row[2],
             'source_link': row[3],
         }
@@ -246,59 +311,24 @@ def get_library_stats():
             stats['by_type'] = {row[0] or 'unknown': row[1] for row in cur.fetchall()}
 
             cur.execute(
-                "SELECT source, COUNT(*) AS c FROM media_metadata "
-                "WHERE source IS NOT NULL AND source != '' "
-                "GROUP BY source ORDER BY c DESC LIMIT 5"
+                "SELECT source_name, COUNT(*) AS c FROM media_metadata "
+                "WHERE source_name IS NOT NULL AND source_name != '' "
+                "GROUP BY source_name ORDER BY c DESC LIMIT 5"
             )
             stats['top_sources'] = [(row[0], row[1]) for row in cur.fetchall()]
         finally:
             conn.close()
     return stats
 
-# 全局 CSV 写入锁，防止并发写入导致文件冲突或性能瓶颈
-_csv_lock = threading.Lock()
 
-def delete_csv_records(save_dir, filenames):
-    """从 save_dir 下的 metadata.csv 中删除指定文件名的行"""
-    if not filenames:
-        return
-        
-    csv_path = os.path.join(save_dir, "metadata.csv")
-    if not os.path.exists(csv_path):
-        return
-        
-    try:
-        with _csv_lock:
-            temp_path = csv_path + ".tmp"
-            headers = [
-                'filename', 'datetime', 'file_id', 'file_unique_id', 
-                'media_group_id', 'media_type', 'caption', 'source', 
-                'source_id', 'source_link', 'source_type'
-            ]
-            
-            with open(csv_path, 'r', encoding='utf-8-sig') as fin, \
-                 open(temp_path, 'w', newline='', encoding='utf-8-sig') as fout:
-                reader = csv.DictReader(fin)
-                writer = csv.DictWriter(fout, fieldnames=headers)
-                writer.writeheader()
-                
-                for row in reader:
-                    if row['filename'] not in filenames:
-                        writer.writerow(row)
-            
-            os.replace(temp_path, csv_path)
-            logger.info(f"已更新 CSV 备份: {csv_path} (删除了 {len(filenames)} 条记录)")
-    except Exception as e:
-        logger.error(f"更新 CSV 备份失败: {e}")
-
-def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, media_type='photo', caption=None, source=None, source_id=None, source_link=None, source_type=None):
-    """将媒体元数据保存到SQLite数据库，并同步追加到本地 CSV 作为物理备份"""
-    # 清洗标题：将换行替换为空格，并将多个空格合并为一个
-    if caption:
-        caption = caption.replace('\n', ' ').replace('\r', ' ')
-        caption = re.sub(r'\s+', ' ', caption).strip()
-    else:
+def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, media_type='photo', caption=None, source_name=None, source_id=None, source_link=None, source_type=None, message_time=None, message_id=None, remark=None):
+    """将媒体元数据保存到SQLite数据库"""
+    if not caption:
         caption = ''
+
+    # 统一 message_time 格式，去掉时区信息
+    if message_time:
+        message_time = message_time.replace('+00:00', '').replace('+0000', '').replace('Z', '')
     
     try:
         with _db_lock:
@@ -307,10 +337,10 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO media_metadata (
-                        user_id, user_name, filename, datetime, file_id, file_unique_id, 
-                        media_group_id, media_type, caption, source, source_id, 
-                        source_link, source_type
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        user_id, user_name, filename, datetime, file_id, file_unique_id,
+                        media_group_id, media_type, caption, source_name, source_id,
+                        source_link, source_type, message_time, message_id, remark
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     user.id,
                     user.username or user.first_name,
@@ -321,51 +351,18 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
                     media_group_id or '',
                     media_type,
                     caption,
-                    source or '',
+                    source_name or '',
                     source_id or '',
                     source_link or '',
-                    source_type or 'unknown'
+                    source_type or 'unknown',
+                    message_time,
+                    message_id,
+                    remark or '',
                 ))
                 conn.commit()
             finally:
                 conn.close()
         logger.debug(f"已将{media_type}元数据保存至数据库")
-        
-        # 同步保存到本地 CSV 作为物理备份 (如果指定了 save_dir)
-        if save_dir:
-            try:
-                # 使用锁确保 CSV 写入的原子性，防止并发下载时文件内容错乱
-                with _csv_lock:
-                    csv_path = os.path.join(save_dir, "metadata.csv")
-                    file_exists = os.path.isfile(csv_path)
-                    
-                    headers = [
-                        'filename', 'datetime', 'file_id', 'file_unique_id', 
-                        'media_group_id', 'media_type', 'caption', 'source', 
-                        'source_id', 'source_link', 'source_type'
-                    ]
-                    
-                    with open(csv_path, 'a', newline='', encoding='utf-8-sig') as f:
-                        writer = csv.DictWriter(f, fieldnames=headers)
-                        if not file_exists:
-                            writer.writeheader()
-                        
-                        writer.writerow({
-                            'filename': file_name,
-                            'datetime': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            'file_id': media_obj.file_id,
-                            'file_unique_id': media_obj.file_unique_id,
-                            'media_group_id': media_group_id or '',
-                            'media_type': media_type,
-                            'caption': caption,
-                            'source': source or '',
-                            'source_id': source_id or '',
-                            'source_link': source_link or '',
-                            'source_type': source_type or 'unknown'
-                        })
-                logger.debug(f"已同步追加 CSV 备份: {csv_path}")
-            except Exception as e:
-                logger.error(f"同步 CSV 备份失败: {e}")
 
         return True
     except sqlite3.IntegrityError:
@@ -381,7 +378,6 @@ def delete_media_by_id(record_ids):
         return 0
 
     deleted_count = 0
-    dir_files_map = {}  # {save_dir: [filenames]}
 
     try:
         with _db_lock:
@@ -392,19 +388,16 @@ def delete_media_by_id(record_ids):
 
                 # 1. 一次性查出所有待删除记录的信息（避免 N+1 查询）
                 cursor.execute(
-                    f"SELECT id, filename, source, source_type, user_id, user_name "
+                    f"SELECT id, filename, source_name, source_type, user_id, user_name "
                     f"FROM media_metadata WHERE id IN ({placeholders})",
                     tuple(record_ids),
                 )
                 rows = cursor.fetchall()
 
-                for _id, filename, source, source_type, user_id, user_name in rows:
-                    # 构建虚拟用户对象以获取目录
+                for _id, filename, source_name, source_type, user_id, user_name in rows:
                     user_stub = type('User', (), {'id': user_id, 'username': user_name, 'first_name': user_name})
-                    save_dir = get_save_directory(user_stub, source, source_type)
+                    save_dir = get_save_directory(user_stub, source_name, source_type)
                     file_path = os.path.join(save_dir, filename)
-
-                    dir_files_map.setdefault(save_dir, []).append(filename)
 
                     # 物理删除文件
                     if os.path.exists(file_path):
@@ -423,10 +416,6 @@ def delete_media_by_id(record_ids):
                 conn.commit()
             finally:
                 conn.close()
-
-        # 3. 更新 CSV 备份
-        for save_dir, filenames in dir_files_map.items():
-            delete_csv_records(save_dir, filenames)
 
     except Exception as e:
         logger.error(f"按 ID 批量删除媒体记录失败: {e}")
@@ -456,8 +445,61 @@ def delete_media_records(file_unique_ids):
 
 # --- 审计日志 ---
 
-AUDIT_LOG_PATH = os.path.join(DATA_DIR, 'audit.jsonl')
+AUDIT_DIR = DATA_DIR
 _audit_lock = threading.Lock()
+
+
+def _audit_source_type(entry):
+    """从 entry 中提取来源分类：channel / bot / group / private / other"""
+    # group_info 路径已自带 source_type
+    st = entry.get('source_type')
+    if st in ('channel', 'bot', 'group'):
+        return st
+    if st in ('user', 'private', 'private_user'):
+        return 'private'
+
+    # message 路径：从 raw.to_dict 中提取
+    raw = entry.get('raw')
+    if isinstance(raw, dict):
+        # 优先 forward_origin
+        fo = raw.get('forward_origin') or {}
+        fo_type = fo.get('type')
+        if fo_type == 'channel':
+            return 'channel'
+        if fo_type in ('chat', 'supergroup'):
+            return 'group'
+        if fo_type == 'hidden_user':
+            return 'private'
+        if fo_type == 'user':
+            sender = fo.get('sender_user') or {}
+            return 'bot' if sender.get('is_bot') else 'private'
+
+        # 没有 forward_origin：看 chat_type
+        chat_type = raw.get('chat', {}).get('type')
+        if chat_type == 'channel':
+            return 'channel'
+        if chat_type in ('supergroup', 'group'):
+            return 'group'
+        if chat_type == 'private':
+            from_user = raw.get('from_user') or {}
+            return 'bot' if from_user.get('is_bot') else 'private'
+        if chat_type == 'bot':
+            return 'bot'
+
+    return 'other'
+
+
+_source_type_labels = {
+    'channel': '频道',
+    'bot': '机器人',
+    'group': '群组',
+    'private': '用户',
+    'other': '其他',
+}
+
+
+def _audit_path(source_type):
+    return os.path.join(AUDIT_DIR, f'audit_{source_type}.json')
 
 
 def append_audit(msg_type, message=None, group_info=None, raw_dict=None, note=None):
@@ -498,6 +540,21 @@ def append_audit(msg_type, message=None, group_info=None, raw_dict=None, note=No
                 entry['caption'] = message.caption[:500]
             if hasattr(message, 'media_group_id') and message.media_group_id:
                 entry['media_group_id'] = message.media_group_id
+            # 原始消息 ID 和时间
+            fo = getattr(message, 'forward_origin', None)
+            if fo:
+                msg_id = getattr(fo, 'message_id', None) or getattr(message, 'message_id', None)
+                msg_date = getattr(fo, 'date', None)
+            else:
+                msg_id = message.message_id
+                msg_date = getattr(message, 'date', None)
+            if msg_id is not None:
+                entry['message_id'] = msg_id
+            if msg_date is not None:
+                try:
+                    entry['message_time'] = msg_date.isoformat() if hasattr(msg_date, 'isoformat') else str(msg_date)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -506,7 +563,7 @@ def append_audit(msg_type, message=None, group_info=None, raw_dict=None, note=No
             entry['chat_id'] = group_info.get('chat_id')
             entry['media_group_id'] = group_info.get('media_group_id')
             entry['user_id'] = group_info.get('user_id')
-            entry['source'] = group_info.get('source')
+            entry['source_name'] = group_info.get('source_name')
             entry['source_link'] = group_info.get('source_link')
             entry['source_type'] = group_info.get('source_type')
             entry['caption'] = (group_info.get('caption') or '')[:500]
@@ -514,15 +571,21 @@ def append_audit(msg_type, message=None, group_info=None, raw_dict=None, note=No
             items = group_info.get('media_items', [])
             entry['item_count'] = len(items)
             entry['item_types'] = [m.get('media_type') for m in items]
-            # 优先使用完整的原始消息数据（包含 entities/caption_entities）
+            # 取首项的消息时间和 message_id
+            if items:
+                first = items[0]
+                if first.get('message_date'):
+                    entry['message_time'] = first['message_date']
+                elif first.get('message_time'):
+                    entry['message_time'] = first['message_time']
+                if first.get('message_id') is not None:
+                    entry['message_id'] = first['message_id']
+            # raw 写入完整原始数据（包含 media_items）
             raw_msg = group_info.get('raw_message')
             if isinstance(raw_msg, dict):
                 entry['raw'] = raw_msg
             else:
-                # 降级：从 group_info 中提取已知字段
-                safe = {k: v for k, v in group_info.items() if k not in ('media_items', 'raw_message')}
-                safe['media_items_count'] = len(items)
-                entry['raw'] = safe
+                entry['raw'] = {k: v for k, v in group_info.items() if k != 'raw_message'}
         except Exception:
             pass
 
@@ -533,8 +596,21 @@ def append_audit(msg_type, message=None, group_info=None, raw_dict=None, note=No
         entry['note'] = note
 
     try:
+        st = _audit_source_type(entry)
+        entry['source_type'] = st
+        path = _audit_path(st)
         with _audit_lock:
-            with open(AUDIT_LOG_PATH, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            entries = []
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        existing = json.load(f)
+                    if isinstance(existing, list):
+                        entries = existing
+                except Exception:
+                    entries = []
+            entries.append(entry)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(entries, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.warning(f"写入审计日志失败: {e}")

@@ -15,6 +15,7 @@ from config import logger, USER_API_ENABLED
 from utils import (
     get_save_directory, generate_temp_filename, get_image_extension,
     get_video_extension, save_to_db, get_duplicate_info, delete_media_records,
+    get_message_date, get_message_id, utc_to_local,
 )
 import user_api
 from bot import state
@@ -74,7 +75,7 @@ def build_progress_bar(media_items, items_status, item_progress):
     return "".join(parts)
 
 
-def save_media_metadata(user, media_info, final_filename, save_dir, media_group_id=None, fallback_link=None):
+def save_media_metadata(user, media_info, final_filename, save_dir, media_group_id=None, fallback_link=None, message_time=None):
     media_obj_stub = type('Media', (), {
         'file_id': media_info['file_id'],
         'file_unique_id': media_info['file_unique_id'],
@@ -84,9 +85,11 @@ def save_media_metadata(user, media_info, final_filename, save_dir, media_group_
         save_dir=save_dir, media_group_id=media_group_id,
         media_type=media_info.get('media_type', 'photo'),
         caption=media_info.get('caption'),
-        source=media_info.get('source'), source_id=media_info.get('source_id'),
+        source_name=media_info.get('source_name'), source_id=media_info.get('source_id'),
         source_link=media_info.get('source_link') or fallback_link,
         source_type=media_info.get('source_type'),
+        message_time=message_time,
+        message_id=media_info.get('message_id'),
     )
 
 
@@ -109,7 +112,7 @@ def _single_buttons(single_key, is_dup, has_failed):
 def build_single_record(media_obj, media_type, date_dir, source_info, ext_for_large,
                         chat, message, final_filename=None):
     """构造一条可脱离原始 update 复用的单张下载记录。"""
-    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = source_info
+    source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id = source_info
     return {
         'file_id': media_obj.file_id,
         'file_unique_id': media_obj.file_unique_id,
@@ -119,7 +122,7 @@ def build_single_record(media_obj, media_type, date_dir, source_info, ext_for_la
         'final_filename': final_filename,
         'caption': message.caption,
         'file_size': getattr(media_obj, 'file_size', 0) or 0,
-        'source': source,
+        'source_name': source_name,
         'source_id': source_id,
         'source_link': source_link,
         'source_type': source_type,
@@ -127,9 +130,10 @@ def build_single_record(media_obj, media_type, date_dir, source_info, ext_for_la
         'orig_msg_id': orig_msg_id,
         'chat_id': chat.id,
         'chat_type': chat.type,
-        'message_id': message.message_id,
+        'message_id': get_message_id(message),
         'user_id': message.from_user.id if message.from_user else None,
         'user_name': (message.from_user.username or message.from_user.first_name) if message.from_user else None,
+        'message_time': utc_to_local(get_message_date(message)).isoformat() if message and message.date else None,
     }
 
 
@@ -140,9 +144,9 @@ async def reply_duplicate(update, media_obj, media_type, caption):
         return False
 
     label = MEDIA_LABELS.get(media_type, '资源')
-    source_display = dup_info.get('source') or '未知'
+    source_display = dup_info.get('source_name') or '未知'
     if dup_info.get('source_link'):
-        source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
+        source_display = f"[{dup_info['source_name']}]({dup_info['source_link']})"
 
     reply_msg = (
         f"♻️ 检测到重复资源 ({label})\n\n"
@@ -274,8 +278,10 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
     save_to_db(
         _stub_user(record), media_obj_stub, final_filename,
         save_dir=date_dir, media_type=media_type, caption=record.get('caption'),
-        source=record.get('source'), source_id=record.get('source_id'),
+        source_name=record.get('source_name'), source_id=record.get('source_id'),
         source_link=record.get('source_link'), source_type=source_type,
+        message_time=record.get('message_time'),
+        message_id=record.get('link_message_id'),
     )
     record['final_filename'] = final_filename
     return final_filename
@@ -303,8 +309,10 @@ async def download_small_from_record(bot, record):
         save_to_db(
             _stub_user(record), media_obj_stub, final_filename,
             save_dir=date_dir, media_type=media_type, caption=record.get('caption'),
-            source=record.get('source'), source_id=record.get('source_id'),
+            source_name=record.get('source_name'), source_id=record.get('source_id'),
             source_link=record.get('source_link'), source_type=record.get('source_type'),
+            message_time=record.get('message_time'),
+            message_id=record.get('link_message_id'),
         )
         record['final_filename'] = final_filename
         return final_filename
@@ -324,7 +332,8 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
 
     User API 调用是阻塞的，放到默认线程池执行，避免阻塞 PTB 事件循环。
     """
-    source, source_id, source_link, source_type, orig_chat_id, orig_msg_id = source_info
+    source_name, source_id, source_link, source_type, orig_chat_id, orig_msg_id = source_info
+    message_time = utc_to_local(get_message_date(update.message)).isoformat() if update.message and update.message.date else None
 
     temp_filename = generate_temp_filename()
     final_filename = f"{temp_filename}{ext}"
@@ -376,7 +385,9 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
     save_to_db(
         update.effective_user, media_obj, final_filename,
         save_dir=date_dir, media_type=media_type, caption=update.message.caption,
-        source=source, source_id=source_id, source_link=source_link, source_type=source_type,
+            source_name=source_name, source_id=source_id, source_link=source_link, source_type=source_type,
+        message_time=message_time,
+        message_id=get_message_id(update.message),
     )
     return final_filename
 
@@ -387,7 +398,8 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
     v21 中 get_file() 与 file.download_to_drive() 均为协程。
     detect_ext 与 save_to_db 是同步的轻量操作，直接调用即可。
     """
-    source, source_id, source_link, source_type, _, _ = source_info
+    source_name, source_id, source_link, source_type, _, _ = source_info
+    message_time = utc_to_local(get_message_date(update.message)).isoformat() if update.message and update.message.date else None
 
     temp_filename = generate_temp_filename()
     temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
@@ -404,7 +416,9 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
         save_to_db(
             update.effective_user, media_obj, final_filename,
             save_dir=date_dir, media_type=media_type, caption=update.message.caption,
-            source=source, source_id=source_id, source_link=source_link, source_type=source_type,
+        source_name=source_name, source_id=source_id, source_link=source_link, source_type=source_type,
+            message_time=message_time,
+            message_id=get_message_id(update.message),
         )
         logger.info(f"已保存{MEDIA_LABELS.get(media_type, '文件')}: {final_path}")
         return final_filename

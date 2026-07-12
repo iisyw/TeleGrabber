@@ -239,7 +239,7 @@ async def _handle_delete(query, collection_key):
             'user_id': group_info.get('user_id'),
             'user_name': group_info.get('user_name'),
         })
-        save_dir = get_save_directory(user_stub, group_info.get('source'), group_info.get('source_type'))
+        save_dir = get_save_directory(user_stub, group_info.get('source_name'), group_info.get('source_type'))
 
         extra_deleted = 0
         if base_timestamp and media_group_id:

@@ -178,7 +178,7 @@ async def _process_link(update, context, args):
             'user_name': user.username or user.first_name,
             'media_items': media_items,
             'status_message_id': status_message.message_id,
-            'source': first_item.get('source'),
+            'source_name': first_item.get('source_name'),
             'source_id': first_item.get('source_id'),
             'source_link': first_item.get('source_link') or ref_text,
             'source_type': first_item.get('source_type'),
@@ -194,7 +194,7 @@ async def _process_link(update, context, args):
     media_info = media_items[0]
     label = get_media_label(media_info.get('media_type'))
     dup_info = get_duplicate_info(media_info['file_unique_id'])
-    date_dir = get_save_directory(update.effective_user, media_info['source'], media_info['source_type'])
+    date_dir = get_save_directory(update.effective_user, media_info['source_name'], media_info['source_type'])
     single_key = uuid.uuid4().hex[:16]
     record = {
         'file_id': media_info['file_id'],
@@ -205,7 +205,7 @@ async def _process_link(update, context, args):
         'final_filename': dup_info['filename'] if dup_info else None,
         'caption': media_info.get('caption'),
         'file_size': media_info.get('file_size', 0) or 0,
-        'source': media_info.get('source'),
+        'source_name': media_info.get('source_name'),
         'source_id': media_info.get('source_id'),
         'source_link': media_info.get('source_link') or ref_text,
         'source_type': media_info.get('source_type'),
@@ -217,13 +217,14 @@ async def _process_link(update, context, args):
         'download_method': DOWNLOAD_METHOD_USER,
         'link_chat_id': chat_id,
         'link_message_id': media_info['message_id'],
+        'message_time': media_info.get('message_date'),
     }
     state.put_single_record(single_key, record)
 
     if dup_info:
-        source_display = dup_info.get('source') or '未知'
+        source_display = dup_info.get('source_name') or '未知'
         if dup_info.get('source_link'):
-            source_display = f"[{dup_info['source']}]({dup_info['source_link']})"
+            source_display = f"[{dup_info['source_name']}]({dup_info['source_link']})"
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=status_message.message_id,
@@ -251,7 +252,7 @@ async def _process_link(update, context, args):
             f"📋 检测到资源\n"
             f"类型: {label}\n"
             f"大小: {size_str}\n"
-            f"来源: {media_info.get('source') or '未知'}\n\n"
+            f"来源: {media_info.get('source_name') or '未知'}\n\n"
             f"⏳ 正在通过 User API 下载..."
         ),
         parse_mode='Markdown',
@@ -280,7 +281,7 @@ async def _process_link(update, context, args):
                         f"📋 检测到资源\n"
                         f"类型: {label}\n"
                         f"大小: {size_str}\n"
-                        f"来源: {media_info.get('source') or '未知'}\n\n"
+                        f"来源: {media_info.get('source_name') or '未知'}\n\n"
                         f"☁️ 正在通过 User API 下载... {percent}%"
                     ),
                 )
@@ -307,6 +308,7 @@ async def _process_link(update, context, args):
         db_success = save_media_metadata(
             update.effective_user, media_info, final_filename,
             save_dir=date_dir, fallback_link=ref_text,
+            message_time=media_info.get('message_date'),
         )
         if db_success:
             record['final_filename'] = final_filename
@@ -320,7 +322,7 @@ async def _process_link(update, context, args):
             f"📋 检测到资源\n"
             f"类型: {label}\n"
             f"大小: {size_str}\n"
-            f"来源: {media_info.get('source') or '未知'}\n\n"
+            f"来源: {media_info.get('source_name') or '未知'}\n\n"
             f"{'✅' if not has_failed else '❌'} {label}{'已保存' if not has_failed else '保存失败'}"
         ),
         parse_mode='Markdown',
@@ -346,6 +348,13 @@ async def handle_text_message(update, context) -> None:
     match = re.search(r'https?://t\.me/\S+', text)
     if match:
         await _process_link(update, context, [match.group(0)])
+        return
+
+    if getattr(message, 'has_protected_content', False):
+        await message.reply_text(
+            "🔒 该来源开启了内容保护，Bot 无法通过 API 下载。\n请直接在 Telegram 中查看。",
+            reply_to_message_id=message.message_id,
+        )
         return
 
     await handle_unsupported(update, context)
