@@ -1,0 +1,99 @@
+.storage-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.storage-card {
+  padding: 14px;
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  background: var(--bubble-bg);
+}
+
+.storage-card-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.storage-card-value {
+  margin-top: 6px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.storage-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.storage-row {
+  display: grid;
+  grid-template-columns: 1fr 100px 80px 100px;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--divider);
+  font-size: 12px;
+}
+
+.storage-head {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.storage-source {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.duplicate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.duplicate-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--divider);
+  font-size: 12px;
+}
+
+.duplicate-main {
+  min-width: 0;
+}
+
+.duplicate-title {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.duplicate-files {
+  margin-top: 3px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.duplicate-sources {
+  flex-shrink: 0;
+  max-width: 45%;
+  color: var(--text-muted);
+  text-align: right;
+  word-break: break-all;
+}
+
+@media (max-width: 720px) {
+  .storage-row {
+    grid-template-columns: 1fr 70px 60px 80px;
+  }
+}

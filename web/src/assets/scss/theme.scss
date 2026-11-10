@@ -1,0 +1,73 @@
+:root {
+  --sidebar-width: 280px;
+  --top-bar-height: 54px;
+
+  /* Telegram Web K night theme */
+  --bg: #0a121b;
+  --sidebar-bg: #1b2836;
+  --sidebar-hover: #243447;
+  --sidebar-active: #2b5278;
+  --sidebar-separator: #2a3b4f;
+  --chat-bg: #0a121b;
+  --bubble-bg: #24384d;
+  --bubble-hover: #2b4560;
+  --text: #ffffff;
+  --text-secondary: #c3cfdb;
+  --text-muted: #90a0b2;
+  --accent: #6ab2f2;
+  --accent-hover: #82c0f7;
+  --danger: #ff595a;
+  --danger-hover: #ff7a7a;
+  --border: #33475e;
+  --divider: #33475e;
+  --date-color: #90a0b2;
+  --bubble-radius: 12px;
+  --transition: 0.15s ease;
+  --bg-hover: #243447;
+  --media-bg: #071019;
+  --input-border: #3a4f66;
+  --bubble-shadow: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --date-bg: rgba(0, 0, 0, 0.45);
+  --date-text: #ffffff;
+  --overlay: rgba(0, 0, 0, 0.9);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.2);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
+  --chat-bg-image:
+    radial-gradient(ellipse at 50% 0%, rgba(43, 82, 120, 0.3) 0%, transparent 55%),
+    linear-gradient(180deg, #0d1824 0%, #0a121b 100%);
+}
+
+html[data-theme="light"] {
+  --bg: #f4f4f5;
+  --sidebar-bg: #ffffff;
+  --sidebar-hover: #f1f4f7;
+  --sidebar-active: #3390ec;
+  --sidebar-separator: #e4e8ec;
+  --chat-bg: #e6ebee;
+  --bubble-bg: #ffffff;
+  --bubble-hover: #f7f9fb;
+  --text: #0f1419;
+  --text-secondary: #5f6b77;
+  --text-muted: #8b98a5;
+  --accent: #3390ec;
+  --accent-hover: #2b7fcf;
+  --danger: #e5484d;
+  --danger-hover: #d13438;
+  --border: #e0e6eb;
+  --divider: #e0e6eb;
+  --date-color: #5f6b77;
+  --bg-hover: #f1f4f7;
+  --media-bg: #dbe3e9;
+  --input-border: #d5dde5;
+  --bubble-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
+  --date-bg: rgba(0, 0, 0, 0.28);
+  --date-text: #ffffff;
+  --overlay: rgba(0, 0, 0, 0.45);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.2);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.3);
+  --chat-bg-image:
+    radial-gradient(ellipse at 15% 0%, rgba(51, 144, 236, 0.1) 0%, transparent 45%),
+    radial-gradient(ellipse at 85% 25%, rgba(51, 144, 236, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 100%, rgba(255, 255, 255, 0.55) 0%, transparent 62%),
+    var(--chat-bg);
+}

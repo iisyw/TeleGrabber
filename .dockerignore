@@ -25,8 +25,11 @@ var/
 .installed.cfg
 *.egg
 
-# 环境变量文件
-.env
+# 环境变量文件（仅根目录，前端 web/.env* 需要参与构建）
+/.env
+
+# 本地实际配置（含敏感信息），镜像内只带 config.example.toml
+conf/config.toml
 
 # 下载的媒体文件
 downloads/
@@ -41,4 +44,7 @@ docker-compose.yml
 
 # 运行时数据（DB、session、审计日志）
 data/
-!data/.env.example
+
+# 前端依赖与构建产物（Dockerfile 内单独构建）
+web/node_modules/
+web/dist/

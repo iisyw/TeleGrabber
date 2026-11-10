@@ -14,10 +14,10 @@ TeleGrabber 是一个 Telegram 机器人，用于自动保存接收到的图片�
 - **消息链接下载**：支持 `/link` 命令和自动识别文本中的 `t.me` 链接，通过 User API 下载私密频道/禁止转发消息中的媒体
 - **通用文件下载白名单**：通过 `ALLOWED_FILE_EXTENSIONS` 配置允许下载的文件扩展名（默认支持 zip/rar/7z/apk/pdf 等），非图片/视频文档根据白名单决定是否下载
 - **SQLite 数据库**：持久化存储所有媒体元数据，支持全局去重与跨会话追踪
-- **审计日志**：所有接收到的消息（含单条媒体、文本、媒体组）原始数据自动按来源类型写入 `data/audit_{channel,bot,group,private,other}.json`，便于回溯审查（可通过 `AUDIT_LOG=false` 关闭）
+- **审计日志**：调试时可通过 `AUDIT_LOG=true` 开启，收到的消息会按来源类型写入 `data/audit_{channel,bot,group,private,other}.json`；默认关闭
 - **智能去重与安全删除**：自动跳过库中已存在的资源；"删除"操作仅撤销本次下载，绝不触及历史存量数据
 - **单条 / 媒体组操作按钮**：下载完成后提供重新下载、强制重下、删除等即时操作；重新下载时保留信息头
-- **Web 管理后台**：内置基于 FastAPI 的可视化管理终端，支持大图/视频预览、媒体组聚合展示与远程一键删除（含 Basic Auth 鉴权）
+- **Web 管理后台**：内置基于 FastAPI 的可视化管理终端，支持大图/视频预览、媒体组聚合展示与远程一键删除（个人本地使用，不启用应用内登录）
 - **统一存储库**：按来源归类保存，不做日期分层，方便管理和搜索
 - **用户访问限制**：支持白名单机制，仅允许指定用户使用机器人
 - **代理支持**：内置 SOCKS5/HTTP 代理支持，适应不同网络环境
@@ -32,7 +32,9 @@ TeleGrabber/
 ├── utils.py               # 数据库、文件检测、审计日志
 ├── user_api.py            # MTProto (User API) 下载引擎
 ├── web_backend.py         # Web 后端服务 (FastAPI)
-├── fix_metadata.py         # 元数据修复脚本（message_time / message_id / source_link1 / source_link2 / source_username）
+├── api_response.py        # 统一响应/错误码/requestId
+├── web/                   # Vue 3 前端（构建产物 web/dist，已忽略）
+├── fix_metadata.py         # 元数据修复脚本（message_time / message_id / source_link1 / source_username）
 ├── bot/                   # 机器人逻辑 (python-telegram-bot v21, async)
 │   ├── handlers.py        # 消息处理器
 │   ├── download.py        # 下载逻辑（含进度回调）
@@ -41,10 +43,10 @@ TeleGrabber/
 │   ├── helpers.py         # 装饰器、转发溯源
 │   ├── errors.py          # 全局错误处理
 │   └── state.py           # 全局共享状态
-├── static/                # Web 前端静态资源 (HTML/CSS/JS)
+├── conf/
+│   ├── config.toml        # 实际配置（含敏感信息，已忽略）
+│   └── config.example.toml # 配置模板
 ├── data/
-│   ├── .env.example       # 环境变量模板
-│   ├── .env               # 环境变量（已忽略）
 │   ├── telegrabber.db     # SQLite 数据库
 │   └── audit_*.json       # 审计日志（按来源类型拆分）
 ├── requirements.txt       # 依赖列表
@@ -68,14 +70,22 @@ cd telegrabber
 pip install -r requirements.txt
 ```
 
-3. 创建配置文件：
+3. 构建前端：
 
 ```bash
-# 复制配置模板到 data/ 目录
-cp data/.env.example data/.env
+cd web
+npm install
+npm run build
+cd ..
+```
 
-# 编辑配置文件，填入你的Telegram机器人令牌
-nano data/.env  # 或者使用你喜欢的文本编辑器
+> Docker 部署会在镜像构建阶段自动完成前端构建，无需手动执行。
+
+4. 创建配置文件：
+
+```bash
+cp conf/config.example.toml conf/config.toml
+nano conf/config.toml  # 或者使用你喜欢的文本编辑器
 ```
 
 ### Docker 部署
@@ -89,14 +99,11 @@ git clone https://github.com/yourusername/telegrabber.git
 cd telegrabber
 ```
 
-2. 创建并配置 .env 文件：
+2. 创建并配置 `conf/config.toml`：
 
 ```bash
-# 复制配置模板到 data/ 目录
-cp data/.env.example data/.env
-
-# 编辑配置文件
-nano data/.env
+cp conf/config.example.toml conf/config.toml
+nano conf/config.toml
 ```
 
 3. 使用 Docker Compose 启动服务：
@@ -131,18 +138,19 @@ Docker 部署的优点：
 1. 在 Telegram 中搜索 [@BotFather](https://t.me/BotFather)
 2. 发送命令 `/newbot` 并按照提示创建一个新机器人
 3. 完成后，BotFather 会提供一个令牌（格式类似 `123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ`）
-4. 将此令牌复制到 `.env` 文件中的 `TELEGRAM_BOT_TOKEN=` 后面
+4. 将此令牌填入 `conf/config.toml` 的 `[telegram]` 节：`bot_token = "..."`
 
 ## 网络问题解决方案
 
-如果你在中国大陆或其他网络受限区域，可能无法直接连接到 Telegram API。你可以通过在`.env`文件中设置代理来解决:
+如果你在中国大陆或其他网络受限区域，可能无法直接连接到 Telegram API。可以在 `conf/config.toml` 的 `[telegram]` 节设置代理:
 
-```
-# 使用SOCKS5代理
-PROXY_URL=socks5h://127.0.0.1:1080
+```toml
+[telegram]
+# 使用 SOCKS5 代理
+proxy_url = "socks5h://127.0.0.1:1080"
 
-# 或者使用HTTP代理
-# PROXY_URL=http://127.0.0.1:8124
+# 或者使用 HTTP 代理
+# proxy_url = "http://127.0.0.1:8124"
 ```
 
 SOCKS 代理支持已包含在 `requirements.txt`（`python-telegram-bot[socks]` 提供 Bot API 侧支持，`pysocks` 提供 User API 侧支持），按上述步骤安装依赖即可，无需额外操作。
@@ -233,6 +241,38 @@ python main.py
 
 这一眼即可看出每项实际走哪种下载方式。
 
+## User API 下载范围与 20MB 限制
+
+User API（MTProto）使用的是 `TELEGRAM_API_ID/HASH` 对应账号的登录会话，因此它只能访问**该账号自己能看到的会话**，与媒体是谁发送的无关。
+
+| 场景 | User API 能否下载 |
+|------|-------------------|
+| User API 账号自己与 bot 的私聊 | 可以 |
+| 其他用户与 bot 的私聊 | 不可以 |
+| User API 账号已加入的群组 / 频道 | 可以，不限发送者 |
+| User API 账号未加入的私密群组 / 频道 | 不可以 |
+| 公开频道 | 通常可以 |
+
+下载通道的边界：
+
+- **Bot API**：可以下载任意允许用户发给 bot 的文件，但云端 Bot API 上限为 **20MB**
+- **User API**：没有 20MB 限制，但受账号会话访问范围限制
+- 因此，**其他用户私聊中超过 20MB 的文件，当前架构无法下载**：
+  - Bot API 超过 20MB 下不了
+  - User API 又看不到其他用户的私聊
+
+典型表现是媒体组里图片（<20MB，走 Bot API）成功，而某个视频或大文件（走 User API）失败，并提示 `User API 下载失败`。日志里会出现目标消息 `Media: None`、在最近历史中找不到匹配媒体，这是因为 User API 读到的是它自己账号的会话，不是请求者与 bot 的私聊。
+
+如果需要支持“其他用户私聊中的大文件”，推荐部署 **本地 Bot API server**（`telegram-bot-api`），将下载上限从 20MB 提升到 **2GB**（使用 `conf/config.toml` 中已配置的 `TELEGRAM_API_ID/HASH`）：
+
+```python
+ApplicationBuilder()
+    .base_url("http://127.0.0.1:8081/bot")
+    .local_mode(True)
+```
+
+也可以把 User API 账号加入对应的群组/频道，让群组/频道场景走 User API；但私聊场景无法通过加群解决。
+
 # 🤖 Telegram 机器人交互界面
 
 ### 媒体组（相册）按钮
@@ -264,58 +304,89 @@ TeleGrabber 现在自带一个功能强大的 Web 管理终端，随机器人同
 - **智能排序**：组内媒体按文件名自然排序（1, 2, ..., 10），符合人类预览习惯。
 - **播放与删除**：直接在浏览器内预览图片、播放视频（支持强效停音逻辑），删除采用局部刷新（不回到顶部），并通过玻璃拟态确认弹窗二次确认。
 - **筛选计数**：按来源/搜索筛选时，顶部数量会显示"找到 N 条"。
-- **安全删除**：删除等写操作受 HTTP Basic Auth 保护（见下方配置）。
+- **直接操作**：删除、重试、标签等操作无需登录；Web 后台默认只监听本机，请勿直接暴露到公网。
 - **一键追溯**：预览页提供原始 Telegram 来源链接，支持一键跳转回原始频道/聊天。
+- **下载任务中心**：侧栏「下载任务」查看排队/下载中/暂停/成功/失败/已取消、实时进度、失败原因；支持按来源/媒体组筛选，失败任务单条或批量重试、优先重试、暂停/继续重试队列、取消排队任务、任务详情抽屉与分页加载，任务持久化在 SQLite。重试优先走 User API，小文件失败时自动回退 Bot API；媒体组失败项重试后会回到原相册。
+- **存储管理**：侧栏「存储管理」查看总占用、按来源/类型统计、磁盘使用情况与只读的重复文件列表。
+- **系统状态**：侧栏「系统状态」查看 Bot、User API、代理、磁盘与运行检查清单。
+- **全文搜索**：基于 SQLite FTS5（trigram）检索文案/文件名/来源，支持多关键词、搜索历史与筛选条件 chips。
+- **来源管理**：可置顶、隐藏来源，设置备注名；显示最近同步时间、禁止转发标记与该来源失败任务数，并可直接重试该来源失败任务。
+- **媒体管理**：收藏、标签、备注；支持按收藏/标签筛选，重复文件只读查看。
+- **媒体查看器**：键盘切换、空格播放/暂停、复制链接、视频续播；文件直接在项目机器的 `downloads/` 目录取用。
+- **筛选增强**：消息流顶部漏斗按钮支持按媒体类型、日期范围、收藏、标签筛选，和搜索/来源筛选可叠加使用。
+- **大列表优化**：媒体分页改为 keyset 游标，消息流使用虚拟滚动，只渲染视口附近的气泡。
+- **运维能力**：`/healthz` 健康检查、磁盘不足横幅；审计日志开启后可直接查看 `data/audit_*.json`。
+- **本地访问**：根路径直接进入消息流，无登录页；默认仅监听 `127.0.0.1`。
 
 ### 访问方式：
 
-默认访问地址：`http://localhost:5000` (或服务器 IP:5000)
+默认访问地址：`http://127.0.0.1:5005`
 
-### 端口配置：
+Web 后台默认只监听本机，且没有内置登录鉴权。请勿将端口直接暴露到公网；如需从其他设备访问，建议使用 Tailscale、WireGuard、SSH 隧道，或在反向代理上配置 IP 白名单/Basic Auth。
 
-如需修改 Web 服务端口，可以在 `data/.env` 文件中设置：
-```bash
-WEB_PORT=5000  # 默认 5000
+### 地址与端口配置：
+
+```toml
+[web]
+host = "127.0.0.1"  # 默认仅本机；确需局域网/容器访问时再改为 "0.0.0.0"
+port = 5005
 ```
 
-> **Web 后台登录鉴权**：删除等写操作接口受 HTTP Basic Auth 保护，凭据通过以下两个环境变量配置：
-> ```bash
-> WEB_USERNAME=admin   # 登录用户名，默认 admin
-> WEB_PASSWORD=        # 登录密码，留空则禁用所有写操作（删除接口失效）
+> **无内置鉴权说明**：去掉登录后，任何能访问该端口的人都可以查看、删除媒体，并读取审计日志。修改 `host = "0.0.0.0"` 前请确认网络环境可信。
+>
+> **任务中心配置**：
+> ```toml
+> [tasks]
+> retain_days = 30      # 终态任务保留天数
+> retry_concurrency = 2 # 重试并发数
+> min_free_mb = 512     # 下载前最小剩余磁盘空间
 > ```
-> 注意：Basic Auth 在明文 HTTP 上传输，仅适合内网使用；公网访问请在前面套 HTTPS 反向代理。
 
 ## 配置选项
 
-在`data/.env`文件中可设置以下选项：
+完整配置见 `conf/config.example.toml`，当前支持：
 
-```
+```toml
+[telegram]
 # 必填：Telegram 机器人令牌
-TELEGRAM_BOT_TOKEN=your_token_here
+bot_token = "your_token_here"
 
-# 选填：MTProto (User API) 凭据 (用于下载 > 20MB 文件和 /link 消息链接)
+# 选填：MTProto (User API) 凭据（用于下载 > 20MB 文件和 /link 消息链接）
 # 获取地址：https://my.telegram.org
-TELEGRAM_API_ID=your_api_id
-TELEGRAM_API_HASH=your_api_hash
-
-# 可选：Web 后台登录凭据
-WEB_USERNAME=admin
-WEB_PASSWORD=your_password
+api_id = 0
+api_hash = ""
 
 # 可选：代理设置
-PROXY_URL=http://127.0.0.1:8123
+proxy_url = "http://127.0.0.1:8123"
 
+# 连接超时（秒）与下载重试次数
+connection_timeout = 30
+download_retries = 3
+# 单次下载总超时（秒）
+download_timeout = 3600
+# 连续无进度判定卡死（秒）
+download_stall_timeout = 180
+
+# 可选：允许使用机器人的用户名或用户 ID
+allowed_users = ["your_username", "123456789"]
+
+# 可选：允许下载的文件扩展名白名单
+allowed_file_extensions = [".zip", ".rar", ".7z", ".apk", ".pdf"]
+
+[storage]
 # 可选：保存目录（默认为 downloads）
-SAVE_DIR=downloads
+save_dir = "downloads"
+# 运行数据目录（SQLite、session、审计日志、缩略图）
+data_dir = "data"
 
-# 可选：允许使用机器人的用户列表
-ALLOWED_USERS=your_username,123456789
+[web]
+# 监听地址（默认仅本机）与端口
+host = "127.0.0.1"
+port = 5000
 
-# 可选：允许下载的文件扩展名白名单（逗号分隔）
-# ALLOWED_FILE_EXTENSIONS=.zip,.rar,.7z,.apk,.tar,.gz,.tgz,.pdf,.doc,.docx,.xls,.xlsx,.exe,.iso
-
+[audit]
 # 可选：审计日志开关（默认关闭）
-# AUDIT_LOG=false
+enabled = false
 ```
 
 ## 用户访问限制
@@ -324,14 +395,15 @@ TeleGrabber 支持限制只有特定用户才能使用机器人的功能，这�
 
 ### 设置方法：
 
-1. 在`.env`文件中添加`ALLOWED_USERS`环境变量
-2. 填入允许使用的 Telegram 用户名或用户 ID，多个用户用逗号分隔
+1. 在 `conf/config.toml` 的 `[telegram]` 节配置 `allowed_users`
+2. 填入允许使用的 Telegram 用户名或用户 ID
 3. 用户 ID 可以通过与[@userinfobot](https://t.me/userinfobot)对话获取
 
 示例：
 
-```
-ALLOWED_USERS=john_doe,jane_smith,123456789
+```toml
+[telegram]
+allowed_users = ["john_doe", "jane_smith", "123456789"]
 ```
 
 ### 行为说明：
@@ -340,7 +412,7 @@ ALLOWED_USERS=john_doe,jane_smith,123456789
 - 提示信息中会包含项目的 GitHub 地址，引导用户部署自己的实例
 - 所有授权验证失败的尝试都会在日志中记录
 
-如果`ALLOWED_USERS`环境变量为空或未设置，机器人将允许所有用户使用。
+如果 `[telegram] allowed_users` 为空或未设置，机器人将允许所有用户使用。
 
 ## 高级配置
 
@@ -462,9 +534,9 @@ TeleGrabber 支持以下类型的媒体：
 - 消息类型（photo / video / animation / document / media_group / text / link）
 - 完整的原始消息数据（`message.to_dict()`）
 - 来源信息（chat_id、user_id、source 等）
-- 消息 ID、消息时间、备注信息
+- 当前会话消息 ID、原始来源消息 ID、消息时间、备注信息
 
-可通过 `.env` 中的 `AUDIT_LOG=false` 关闭审计日志。
+审计日志默认关闭；调试时可通过 `conf/config.toml` 的 `[audit] enabled = true` 临时开启。
 
 ## 许可证
 

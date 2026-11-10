@@ -213,46 +213,47 @@ async def _handle_refresh(query, collection_key):
 async def _handle_delete(query, collection_key):
     await query.answer("正在删除本地内容...")
     with state.media_group_lock:
-        group_info = state.processed_groups_history.get(collection_key) or state.active_collections.get(collection_key)
-        if not group_info:
-            logger.warning(f"删除失败：未找到媒体组信息 {collection_key}")
-            await query.edit_message_text("⚠️ 错误：找不到该下载记录，可能已被清理或重启。")
-            return
+        stored_group = state.processed_groups_history.get(collection_key) or state.active_collections.get(collection_key)
+        group_info = dict(stored_group) if stored_group else None
+        if group_info:
+            group_info['media_items'] = [dict(item) for item in stored_group.get('media_items', [])]
 
-        media_items = group_info.get('media_items', [])
-        # 仅删除本次下载成功的记录 (status=1)，不删除重复项 (status=2)
-        file_unique_ids = [item['file_unique_id'] for item in media_items if item.get('status') == 1]
+    if not group_info:
+        logger.warning(f"删除失败：未找到媒体组信息 {collection_key}")
+        await query.edit_message_text("⚠️ 错误：找不到该下载记录，可能已被清理或重启。")
+        return
 
-        deleted_count = delete_media_records(file_unique_ids) if file_unique_ids else 0
+    media_items = group_info.get('media_items', [])
+    # 仅删除本次下载成功的记录 (status=1)，不删除重复项 (status=2)
+    file_unique_ids = [item['file_unique_id'] for item in media_items if item.get('status') == 1]
+    deleted_count = delete_media_records(file_unique_ids) if file_unique_ids else 0
 
-        # 清理内存中的保存标记，防止僵死
-        with state.saving_lock:
-            for item in media_items:
-                fid = item['file_unique_id']
-                if fid in state.saving_unique_ids:
-                    state.saving_unique_ids.remove(fid)
+    # 清理内存中的保存标记，防止僵死
+    with state.saving_lock:
+        for item in media_items:
+            state.saving_unique_ids.discard(item['file_unique_id'])
 
-        # 通过预测文件名尝试物理删除未入库文件
-        base_timestamp = group_info.get('base_timestamp')
-        media_group_id = group_info.get('media_group_id')
-        user_stub = _stub_user({
-            'user_id': group_info.get('user_id'),
-            'user_name': group_info.get('user_name'),
-        })
-        save_dir = get_save_directory(user_stub, group_info.get('source_name'), group_info.get('source_type'))
+    # 通过预测文件名尝试物理删除未入库文件
+    base_timestamp = group_info.get('base_timestamp')
+    media_group_id = group_info.get('media_group_id')
+    user_stub = _stub_user({
+        'user_id': group_info.get('user_id'),
+        'user_name': group_info.get('user_name'),
+    })
+    save_dir = get_save_directory(user_stub, group_info.get('source_name'), group_info.get('source_type'))
 
-        extra_deleted = 0
-        if base_timestamp and media_group_id:
-            for i, item in enumerate(media_items, 1):
-                ext = ".mp4" if item.get('media_type') == 'video' else ".jpg"
-                for fname in (f"{media_group_id}_{i}_{base_timestamp}{ext}", f"{base_timestamp}_temp_{i}"):
-                    fpath = os.path.join(save_dir, fname)
-                    if os.path.exists(fpath):
-                        try:
-                            os.remove(fpath)
-                            extra_deleted += 1
-                        except Exception:
-                            pass
+    extra_deleted = 0
+    if base_timestamp and media_group_id:
+        for i, item in enumerate(media_items, 1):
+            ext = ".mp4" if item.get('media_type') == 'video' else ".jpg"
+            for fname in (f"{media_group_id}_{i}_{base_timestamp}{ext}", f"{base_timestamp}_temp_{i}"):
+                fpath = os.path.join(save_dir, fname)
+                if os.path.exists(fpath):
+                    try:
+                        os.remove(fpath)
+                        extra_deleted += 1
+                    except OSError as e:
+                        logger.warning(f"删除残留文件失败 {fpath}: {e}")
 
     retry_keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),

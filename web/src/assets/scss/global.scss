@@ -1,0 +1,273 @@
+@use './theme';
+
+#app {
+  display: flex;
+  height: 100vh;
+}
+
+.app-body {
+  flex: 1;
+  min-width: 0;
+  height: 100vh;
+  display: flex;
+}
+
+.app-body--standalone {
+  width: 100%;
+}
+
+/* 来源类型/会话类型徽标 */
+.source-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-right: 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 1.2;
+  vertical-align: top;
+
+  &.bot {
+    background: rgba(0, 120, 215, 0.2);
+    color: #0078d4;
+  }
+
+  &.private {
+    background: rgba(0, 180, 0, 0.2);
+    color: #00b300;
+  }
+
+  &.group {
+    background: rgba(255, 165, 0, 0.2);
+    color: #ff8c00;
+  }
+
+  &.channel {
+    background: rgba(140, 0, 210, 0.2);
+    color: #8c00d2;
+  }
+}
+
+.source-badge-wrapper {
+  margin-bottom: 2px;
+}
+
+/* 通用按钮 */
+.btn {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.btn-danger {
+  background: rgba(255, 89, 90, 0.15);
+  color: var(--danger);
+
+  &:hover {
+    background: rgba(255, 89, 90, 0.25);
+  }
+}
+
+.btn-cancel {
+  background: transparent;
+  color: var(--text-secondary);
+
+  &:hover {
+    color: var(--text);
+  }
+}
+
+.btn-small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.modal-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 主题切换按钮 */
+.theme-toggle {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--input-border);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+
+  &:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  svg {
+    display: block;
+  }
+}
+
+/* 管理页通用骨架 */
+.manage-page {
+  flex: 1;
+  min-width: 0;
+  height: 100vh;
+  padding: 24px;
+  overflow-y: auto;
+  background: var(--chat-bg-image);
+  color: var(--text);
+}
+
+.manage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.manage-title {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.manage-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.manage-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.manage-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.manage-tab {
+  padding: 6px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+
+  &.active {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
+}
+
+.manage-empty {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.app-alert {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  z-index: 3000;
+  max-width: 90vw;
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 89, 90, 0.5);
+  border-radius: 8px;
+  background: rgba(229, 72, 77, 0.92);
+  color: #fff;
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  transform: translateX(-50%);
+}
+
+.app-welcome {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2500;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  max-width: 360px;
+  padding: 14px 16px;
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  background: var(--sidebar-bg);
+  color: var(--text);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+
+  button {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+
+    &:hover {
+      color: var(--text);
+    }
+  }
+}
+
+.app-welcome-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.app-welcome-sub {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 多个管理页共用的面板 */
+.storage-section {
+  padding: 16px;
+  margin-bottom: 16px;
+  background: var(--bubble-bg);
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+}
+
+.storage-section-title {
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .theme-toggle {
+    width: 32px;
+    height: 32px;
+  }
+
+  .manage-page {
+    padding: 12px;
+  }
+
+  .manage-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

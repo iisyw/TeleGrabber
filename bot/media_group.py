@@ -11,6 +11,7 @@ import json
 import time
 import asyncio
 import threading
+import uuid
 from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,9 +23,48 @@ from utils import (
     append_audit, get_message_date, get_message_id, utc_to_local,
 )
 import user_api
+import task_manager
 from bot import state
 from bot.helpers import get_forward_source_info
-from bot.download import DOWNLOAD_METHOD_BOT, DOWNLOAD_METHOD_USER, build_progress_bar, _stub_user
+from bot.download import (
+    DOWNLOAD_METHOD_BOT, DOWNLOAD_METHOD_USER, build_progress_bar, _stub_user,
+    save_telegram_thumbnail_by_id,
+)
+
+USER_API_PRIVATE_LARGE_REASON = (
+    "其他用户私聊大文件，当前架构无法下载"
+    "（Bot API 上限 20MB，User API 无法访问其他用户的私聊）"
+)
+
+# 状态消息编辑顺序控制：同一消息按序号只应用最新一次
+_status_seq_lock = threading.Lock()
+_status_seq_counter = 0
+_status_edit_locks = {}
+_status_applied_seq = {}
+
+
+def _is_other_user_private_large(user_obj, media_info, file_size, group_info):
+    """判断是否为「其他用户私聊中的大文件」，这种情况下 User API 必然无法下载。"""
+    if file_size < 20 * 1024 * 1024:
+        return False
+
+    chat_type = group_info.get('chat_type')
+    source_type = media_info.get('source_type') or group_info.get('source_type')
+    if chat_type != 'private' and source_type not in ('private_user', 'user'):
+        return False
+
+    own_user_id = user_api.get_own_user_id()
+    if not own_user_id or user_obj.id == own_user_id:
+        return False
+
+    # 来源是频道/群组且带有外部 chat id 时，User API 账号可能仍有权限，交给实际下载判断
+    if source_type in ('channel', 'group') and (
+        media_info.get('link_chat_id') or media_info.get('orig_chat_id')
+    ):
+        return False
+
+    return True
+
 
 
 def load_media_groups_collection():
@@ -117,7 +157,10 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
     media_info = {
         'file_id': media_obj.file_id,
         'file_unique_id': media_obj.file_unique_id,
+        'thumb_file_id': getattr(getattr(media_obj, 'thumbnail', None), 'file_id', None),
         'media_type': media_type,
+        'width': getattr(media_obj, 'width', None),
+        'height': getattr(media_obj, 'height', None),
         'message_id': message.message_id if message else None,
         'orig_message_id': get_message_id(message) if message else None,
         'file_size': getattr(media_obj, 'file_size', 0),
@@ -225,14 +268,30 @@ async def process_next_media_group(context):
 
 
 def _edit_status_threadsafe(bot, loop, chat_id, message_id, text, reply_markup=None):
-    """从下载线程把一次消息编辑调度回主事件循环（不等待结果）。"""
+    """从下载线程把一次消息编辑调度回主事件循环（不等待结果）。
+
+    同一状态消息的编辑会用序号 + 异步锁串行化：
+    - 后调度的消息序号更大，最终状态一定最后写入
+    - 已经排队的旧进度更新即使晚到，也会因为序号落后而被丢弃
+    """
+    global _status_seq_counter
+    key = (chat_id, message_id)
+    with _status_seq_lock:
+        _status_seq_counter += 1
+        seq = _status_seq_counter
+
     async def _edit():
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id,
-                text=text, reply_markup=reply_markup,
-                parse_mode='Markdown', disable_web_page_preview=True,
-            )
+            lock = _status_edit_locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                if seq <= _status_applied_seq.get(key, 0):
+                    return
+                _status_applied_seq[key] = seq
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=message_id,
+                    text=text, reply_markup=reply_markup,
+                    parse_mode='Markdown', disable_web_page_preview=True,
+                )
         except Exception:
             pass
     try:
@@ -312,6 +371,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
     """媒体组下载的阻塞主体，运行在线程池中。"""
     chat_id = group_info['chat_id']
     media_group_id = group_info['media_group_id']
+    batch_id = uuid.uuid4().hex
     user_name = group_info['user_name']
     media_items = group_info['media_items']
     status_message_id = group_info.get('status_message_id')
@@ -371,6 +431,21 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
     source_type = group_info.get('source_type')
     save_dir = get_save_directory(user_obj, source_name, source_type)
 
+    def _save_group_thumb(media_info, file_unique_id):
+        """视频/动画类优先复用 Telegram 自带缩略图作为列表封面。"""
+        if media_info.get('media_type') == 'photo':
+            return
+        thumb_fid = media_info.get('thumb_file_id')
+        if not thumb_fid:
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                save_telegram_thumbnail_by_id(bot, thumb_fid, file_unique_id), loop
+            )
+            fut.result(timeout=30)
+        except Exception as e:
+            logger.debug(f"保存媒体组缩略图失败 {file_unique_id}: {e}")
+
     start_time = time.time()
     progress_lock = threading.Lock()
     caption = group_info.get('caption')
@@ -421,10 +496,12 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
 
     def download_and_save_task(index, media_info):
         is_internally_saving = False
+        task_id = None
         file_unique_id = media_info['file_unique_id']
         try:
             if items_status[index - 1] in [1, 2]:
                 return True
+            media_info.pop('fail_reason', None)
 
             dup_info = get_duplicate_info(file_unique_id)
             with state.saving_lock:
@@ -455,9 +532,71 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
             media_info['download_method'] = media_info.get('download_method', DOWNLOAD_METHOD_BOT)
             force_user_api = media_info.get('download_method') == DOWNLOAD_METHOD_USER
 
+            task_id = None
+            try:
+                task_id = task_manager.create_task(
+                    user_id=user_obj.id,
+                    user_name=user_obj.username,
+                    chat_id=group_info.get('chat_id'),
+                    message_id=media_info.get('current_message_id') or media_info.get('message_id'),
+                    media_group_id=media_group_id,
+                    batch_id=batch_id,
+                    file_unique_id=file_unique_id,
+                    media_type=media_info.get('media_type'),
+                    source_name=source_name,
+                    source_type=source_type,
+                    download_method='user_api' if force_user_api else 'bot',
+                    total_bytes=file_size,
+                    item_index=index,
+                    retry_context={
+                        'file_id': media_info.get('file_id'),
+                        'file_unique_id': file_unique_id,
+                        'thumb_file_id': media_info.get('thumb_file_id'),
+                        'media_type': media_info.get('media_type'),
+                        'date_dir': save_dir,
+                        'caption': media_info.get('caption') or caption,
+                        'source_name': source_name,
+                        'source_id': group_info.get('source_id'),
+                        'source_link1': media_info.get('source_link1') or group_info.get('source_link1'),
+                        'source_link2': media_info.get('source_link2') or group_info.get('source_link2'),
+                        'source_username': media_info.get('source_username') or group_info.get('source_username'),
+                        'source_type': source_type,
+                        'link_chat_id': media_info.get('link_chat_id'),
+                        'link_message_id': media_info.get('link_message_id'),
+                        'orig_chat_id': media_info.get('orig_chat_id'),
+                        'orig_msg_id': media_info.get('orig_msg_id'),
+                        'chat_id': group_info.get('chat_id'),
+                        'chat_type': group_info.get('chat_type'),
+                        'message_id': media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
+                        'current_message_id': media_info.get('current_message_id') or media_info.get('message_id'),
+                        'original_message_id': media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
+                        'message_time': media_info.get('message_date') or media_info.get('message_time'),
+                        'user_id': user_obj.id,
+                        'user_name': user_obj.username,
+                        'file_size': file_size,
+                        'width': media_info.get('width'),
+                        'height': media_info.get('height'),
+                        'media_group_id': media_group_id,
+                        'batch_id': batch_id,
+                        'item_index': index,
+                        'base_timestamp': base_timestamp,
+                    },
+                )
+                task_manager.update_task(task_id, status='downloading')
+            except Exception as task_error:
+                logger.warning(f"创建下载任务失败: {task_error}")
+
             # 大文件或 /link 来源走 User API (本身就是同步阻塞调用，线程里直接调)
             if force_user_api or (USER_API_ENABLED and file_size >= 20 * 1024 * 1024):
+                if _is_other_user_private_large(user_obj, media_info, file_size, group_info):
+                    media_info['fail_reason'] = USER_API_PRIVATE_LARGE_REASON
+                    if task_id:
+                        task_manager.finish_task(task_id, 'failed', error=USER_API_PRIVATE_LARGE_REASON)
+                    raise Exception(USER_API_PRIVATE_LARGE_REASON)
+
                 media_info['download_method'] = DOWNLOAD_METHOD_USER
+                if task_id:
+                    task_manager.update_task(task_id, download_method='user_api')
                 ext = media_info.get('ext') or (".mp4" if media_info.get('media_type') == 'video' else ".jpg")
                 final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
                 final_path = os.path.join(save_dir, final_filename)
@@ -476,6 +615,8 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                         if percent != item_progress[idx - 1]:
                             with progress_lock:
                                 item_progress[idx - 1] = percent
+                            if task_id:
+                                task_manager.update_progress(task_id, current, total)
                             update_ui_async()
                     else:
                         update_ui_async()
@@ -514,7 +655,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
 
                 if success:
                     media_obj_stub = type('Media', (), {'file_id': media_info['file_id'], 'file_unique_id': file_unique_id})
-                    save_to_db(user_obj, media_obj_stub, final_filename,
+                    db_success = save_to_db(user_obj, media_obj_stub, final_filename,
                                save_dir=save_dir, media_group_id=media_group_id,
                                media_type=media_info.get('media_type', 'photo'),
                                caption=media_info.get('caption') or caption,
@@ -524,7 +665,23 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                source_username=media_info.get('source_username') or group_info.get('source_username'),
                                source_type=source_type,
                                message_time=media_info.get('message_date') or media_info.get('message_time'),
-                               message_id=media_info.get('orig_message_id') or media_info.get('orig_msg_id'))
+                               message_id=media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
+                               current_message_id=media_info.get('current_message_id') or media_info.get('message_id'),
+                               original_message_id=media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
+                               width=media_info.get('width'),
+                               height=media_info.get('height'),
+                               file_size=media_info.get('file_size'))
+                    if not db_success:
+                        try:
+                            os.remove(final_path)
+                        except OSError:
+                            pass
+                        if task_id:
+                            task_manager.finish_task(task_id, 'failed', error='元数据保存数据库失败')
+                        raise Exception("元数据保存数据库失败 (可能数据库被锁定)")
+                    _save_group_thumb(media_info, file_unique_id)
+                    if task_id:
+                        task_manager.finish_task(task_id, 'success', filename=final_filename)
                     with progress_lock:
                         items_status[index - 1] = 1
                         media_info['status'] = 1
@@ -562,10 +719,23 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                     source_username=media_info.get('source_username') or group_info.get('source_username'),
                                     source_type=source_type,
                                     message_time=media_info.get('message_date') or media_info.get('message_time'),
-                                    message_id=media_info.get('orig_message_id') or media_info.get('orig_msg_id'))
+                                    message_id=media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
+                                    current_message_id=media_info.get('current_message_id') or media_info.get('message_id'),
+                                    original_message_id=media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
+                                    width=media_info.get('width'),
+                                    height=media_info.get('height'),
+                                    file_size=media_info.get('file_size'))
             if not db_success:
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+                if task_id:
+                    task_manager.finish_task(task_id, 'failed', error='元数据保存数据库失败')
                 raise Exception("元数据保存数据库失败 (可能数据库被锁定)")
-
+            _save_group_thumb(media_info, file_unique_id)
+            if task_id:
+                task_manager.finish_task(task_id, 'success', filename=final_filename)
             with progress_lock:
                 items_status[index - 1] = 1
                 media_info['status'] = 1
@@ -574,10 +744,12 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
             return True
         except Exception as e:
             logger.error(f"媒体项 {index} 下载失败: {e}")
+            if task_id:
+                task_manager.finish_task(task_id, 'failed', error=str(e))
             with progress_lock:
                 items_status[index - 1] = 3
                 media_info['status'] = 3
-                processed_count['value'] += 1
+                media_info['fail_reason'] = str(e)
             update_ui_async()
             return False
         finally:
@@ -611,6 +783,18 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
         failed_count = sum(1 for s in items_status if s == 3)
         if has_failed:
             finish_text += f"\n⚠️ 有 {failed_count} 项下载失败，点击「❌ 重试失败项」仅重试这些失败项。"
+            failure_lines = []
+            for idx, item in enumerate(media_items, 1):
+                if item.get('status') != 3:
+                    continue
+                reason = item.get('fail_reason') or "下载失败（详情见日志）"
+                failure_lines.append(f" - 第{idx}项: {reason}")
+                if len(failure_lines) >= 5:
+                    break
+            if failure_lines:
+                finish_text += "\n失败明细:" + "\n".join(failure_lines)
+                if failed_count > len(failure_lines):
+                    finish_text += f"\n - 其余 {failed_count - len(failure_lines)} 项见日志"
 
         keyboard = [[
             InlineKeyboardButton("♻️ 重新下载本次", callback_data=f"mg_retry_this:{collection_key}"),

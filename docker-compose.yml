@@ -9,6 +9,6 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data
-      - ./static:/app/static
+      - ./conf/config.toml:/app/conf/config.toml:ro
     environment:
       - TZ=Asia/Shanghai

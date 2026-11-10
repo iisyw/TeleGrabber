@@ -2,14 +2,25 @@
 # -*- coding: utf-8 -*-
 
 from pyrogram import Client, utils
-from pyrogram.errors import ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden
-from config import API_ID, API_HASH, PROXY, logger, SAVE_DIR, DOWNLOAD_RETRIES, DATA_DIR
+from pyrogram.errors import ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden, FloodWait
+try:
+    from pyrogram.errors import ChatForwardsRestricted
+except ImportError:  # 兼容旧版 pyrogram 未导出该异常
+    ChatForwardsRestricted = None
+from config import (
+    API_ID, API_HASH, PROXY, logger, SAVE_DIR, DOWNLOAD_RETRIES, DATA_DIR,
+    DOWNLOAD_TIMEOUT, DOWNLOAD_STALL_TIMEOUT, TASK_MIN_FREE_MB,
+    USER_API_ENABLED,
+)
+from utils import build_private_message_link
 import os
 import asyncio
 import time
 import threading
 import mimetypes
+import random
 import re
+import shutil
 from urllib.parse import urlparse
 from datetime import timezone
 
@@ -18,6 +29,8 @@ _app = None
 _loop = None
 _loop_thread = None
 _init_lock = threading.Lock()
+# 已确认开启“内容保护/禁止转发”的会话，避免每次重复尝试转发
+_protected_chats = set()
 _start_lock = None  
 _semaphore = None 
 _restarting = False # 状态位，防止重入
@@ -85,10 +98,42 @@ def get_pyrogram_client():
                     _loop_thread = threading.Thread(target=_run_loop, args=(_loop,), daemon=True)
                     _loop_thread.start()
                     time.sleep(0.3)
-                
+
                 future = asyncio.run_coroutine_threadsafe(_init_client_task(), _loop)
                 _app = future.result(timeout=180)  # 首次登录可能较慢，但避免永久阻塞
     return _app
+
+
+def get_own_user_id():
+    """返回 User API 登录账号的 user id；未启用/未登录时返回 None。"""
+    try:
+        client = get_pyrogram_client()
+        me = getattr(client, 'me', None) if client else None
+        return getattr(me, 'id', None)
+    except Exception as e:
+        logger.debug(f"获取 User API 账号 ID 失败: {e}")
+        return None
+
+
+def get_status():
+    """返回 User API 当前运行状态，供状态页展示（不触发登录）。"""
+    client = _app
+    me = getattr(client, 'me', None) if client else None
+    return {
+        "enabled": USER_API_ENABLED,
+        "connected": bool(client and getattr(client, 'is_connected', False)),
+        "user_id": getattr(me, 'id', None),
+        "username": getattr(me, 'username', None),
+        "protected_chat_count": len(_protected_chats),
+    }
+
+
+def is_chat_protected(chat_id):
+    """该会话是否已确认开启内容保护/禁止转发。"""
+    if chat_id is None:
+        return False
+    return str(chat_id) in _protected_chats
+
 
 async def _reset_client():
     """在 asyncio 循环中重置客户端"""
@@ -232,7 +277,7 @@ def _message_media_info(message):
     if not source_link1 and source_username:
         source_link1 = f"https://t.me/{source_username}/{message.id}"
     if getattr(chat, 'id', None):
-        source_link2 = f"https://t.me/c/{chat.id}/{message.id}"
+        source_link2 = build_private_message_link(chat.id, message.id)
     else:
         source_link2 = ''
 
@@ -253,6 +298,8 @@ def _message_media_info(message):
     return {
         'message': message,
         'media_type': stored_media_type,
+        'width': getattr(media_obj, 'width', None),
+        'height': getattr(media_obj, 'height', None),
         'file_id': getattr(media_obj, 'file_id', None) or f"user_api:{getattr(chat, 'id', 'unknown')}:{message.id}",
         'file_unique_id': getattr(media_obj, 'file_unique_id', None) or f"user_api:{getattr(chat, 'id', 'unknown')}:{message.id}",
         'file_size': getattr(media_obj, 'file_size', 0) or 0,
@@ -299,17 +346,145 @@ async def _get_link_media_items(chat_id, message_id):
     return items
 
 
+def _expected_media_size(message):
+    """尽量提取媒体预期大小；无法确定时返回 0。"""
+    media_attr = getattr(message, message.media.value) if getattr(message, 'media', None) else None
+    if media_attr and hasattr(media_attr, 'file_size'):
+        return int(media_attr.file_size or 0)
+    if getattr(message, 'video', None):
+        return int(message.video.file_size or 0)
+    if getattr(message, 'document', None):
+        return int(message.document.file_size or 0)
+    if getattr(message, 'photo', None):
+        photos = message.photo if isinstance(message.photo, list) else [message.photo]
+        return int(photos[-1].file_size or 0)
+    if getattr(message, 'animation', None):
+        return int(message.animation.file_size or 0)
+    return 0
+
+
+def _is_permanent_download_error(exc):
+    """权限、消息丢失、文件过大等重试也不会成功的错误。"""
+    if isinstance(exc, (ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden)):
+        return True
+    if ChatForwardsRestricted is not None and isinstance(exc, ChatForwardsRestricted):
+        return True
+    err = str(exc).upper()
+    markers = (
+        "CHANNEL_INVALID", "CHANNEL_PRIVATE", "MSG_ID_INVALID", "PEER_ID_INVALID",
+        "FILE_TOO_BIG", "CHAT_FORWARDS_RESTRICTED", "AUTH_KEY_UNREGISTERED",
+        "USER_DEACTIVATED",
+    )
+    return any(marker in err for marker in markers)
+
+
+async def _download_media_with_limits(client, target, final_path, progress_callback=None, expected_size=0):
+    """下载到 .part，校验完整性后原子改名；同时做总超时和“无进度”卡死检测。"""
+    free = shutil.disk_usage(os.path.dirname(os.path.abspath(final_path))).free
+    required = int((expected_size or 0) * 1.05) + TASK_MIN_FREE_MB * 1024 * 1024
+    if free < required:
+        raise OSError(
+            f"磁盘空间不足：需要约 {required // (1024 * 1024)}MB，"
+            f"当前剩余 {free // (1024 * 1024)}MB"
+        )
+
+    part_path = final_path + ".part"
+    for path in (part_path, part_path + ".temp", final_path + ".temp"):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    progress_state = {"last": time.monotonic()}
+
+    def _progress(current, total):
+        progress_state["last"] = time.monotonic()
+        if progress_callback:
+            try:
+                progress_callback(current, total)
+            except Exception:
+                pass
+
+    dl_task = asyncio.create_task(
+        client.download_media(target, file_name=part_path, progress=_progress)
+    )
+
+    async def _watchdog():
+        while True:
+            await asyncio.sleep(10)
+            if time.monotonic() - progress_state["last"] > DOWNLOAD_STALL_TIMEOUT:
+                dl_task.cancel()
+                raise asyncio.TimeoutError(
+                    f"下载连续 {DOWNLOAD_STALL_TIMEOUT} 秒无进度"
+                )
+
+    watchdog_task = asyncio.create_task(_watchdog())
+    try:
+        done, _ = await asyncio.wait(
+            {dl_task, watchdog_task},
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=DOWNLOAD_TIMEOUT,
+        )
+        if not done:
+            dl_task.cancel()
+            raise asyncio.TimeoutError(f"下载超过 {DOWNLOAD_TIMEOUT} 秒")
+
+        if watchdog_task in done:
+            dl_task.cancel()
+            exc = watchdog_task.exception()
+            raise exc or asyncio.TimeoutError("下载卡死")
+
+        downloaded_path = dl_task.result()
+        if not downloaded_path or not os.path.exists(part_path):
+            raise RuntimeError("下载未生成完整的临时文件")
+
+        actual_size = os.path.getsize(part_path)
+        if expected_size and actual_size < expected_size:
+            raise RuntimeError(
+                f"文件完整性校验失败: 预期 {expected_size} 字节，实际 {actual_size} 字节"
+            )
+
+        os.replace(part_path, final_path)
+        return final_path, actual_size
+    finally:
+        for task in (dl_task, watchdog_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(dl_task, watchdog_task, return_exceptions=True)
+        for path in (part_path, part_path + ".temp", final_path + ".temp"):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
+
 async def _download_message_media(chat_id, message_id, final_path, progress_callback=None):
     async with _semaphore:
         client = get_pyrogram_client()
         message = await client.get_messages(chat_id, message_id)
         if not message or not message.media:
             return None
-        # 优先下载原始 document 源文件（与 _message_media_info 选择保持一致）：
-        # 仅当 document 是视频/图片源文件时才用它，否则下载消息本身的主媒体。
         document = getattr(message, 'document', None)
         target = document if _is_media_document(document) else message
-        return await client.download_media(target, file_name=final_path, progress=progress_callback)
+
+        max_attempts = max(1, DOWNLOAD_RETRIES + 1)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                downloaded_path, _ = await _download_media_with_limits(
+                    client, target, final_path, progress_callback,
+                    expected_size=_expected_media_size(message),
+                )
+                return downloaded_path
+            except Exception as e:
+                if _is_permanent_download_error(e) or attempt >= max_attempts:
+                    logger.error(f"User API 链接下载失败 (第 {attempt} 次): {e}")
+                    return None
+                delay = min(30, 2 ** (attempt - 1)) + random.uniform(0, 1)
+                logger.warning(f"User API 链接下载异常: {e}，{delay:.1f}s 后重试...")
+                await asyncio.sleep(delay)
+        return None
 
 
 async def _do_download(chat_id, message_id, final_path, progress_callback=None, file_unique_id=None):
@@ -391,75 +566,46 @@ async def _do_download(chat_id, message_id, final_path, progress_callback=None, 
                         return False
 
                 t_start = time.time()
-                downloaded_path = await client.download_media(
-                    msg, 
-                    file_name=final_path,
-                    progress=progress_callback
+                expected_size = _expected_media_size(msg)
+                downloaded_path, actual_size = await _download_media_with_limits(
+                    client, msg, final_path, progress_callback,
+                    expected_size=expected_size,
                 )
                 t_end = time.time()
-                
-                if downloaded_path and os.path.exists(downloaded_path):
-                    # --- 完整性验证 ---
-                    actual_size = os.path.getsize(downloaded_path)
-                    expected_size = 0
-                    
-                    # 尽可能从全量媒体属性中提取预期大小
-                    media_attr = getattr(msg, msg.media.value) if msg.media else None
-                    if media_attr and hasattr(media_attr, 'file_size'):
-                        expected_size = media_attr.file_size
-                    elif msg.video: expected_size = msg.video.file_size
-                    elif msg.document: expected_size = msg.document.file_size
-                    elif msg.photo: 
-                        # 照片如果是列表，取最后一个（最大的）
-                        if isinstance(msg.photo, list): 
-                            expected_size = msg.photo[-1].file_size
-                        else:
-                            expected_size = msg.photo.file_size
-                    elif msg.animation: expected_size = msg.animation.file_size
-                    
-                    if expected_size > 0:
-                        if actual_size < expected_size:
-                            logger.error(f"⚠️ 下载文件完整性校验失败: {final_path}")
-                            logger.error(f"预期大小: {expected_size} 字节, 实际大小: {actual_size} 字节 (偏小)")
-                            try: os.remove(downloaded_path)
-                            except: pass
-                            if attempts < max_attempts: continue
-                            return False
-                        else:
-                            logger.info(f"✅ 文件完整性通过: {actual_size} / {expected_size} 字节")
-                    else:
-                        logger.warning(f"❓ 无法确定媒体预期大小，跳过严格校验: {final_path} (当前大小: {actual_size})")
 
-                    if attempts > 1:
-                        logger.info(f"User API 重试下载成功 [{t_end-t_start:.1f}s]: {final_path}")
-                    else:
-                        logger.info(f"User API 下载完成 [{t_end-t_start:.1f}s]: {final_path}")
-                    return True
-                
-                # 如果返回空但没抛异常，也触发重试
-                if attempts < max_attempts: continue
-                return False
+                if expected_size:
+                    logger.info(f"✅ 文件完整性通过: {actual_size} / {expected_size} 字节")
+                else:
+                    logger.warning(f"❓ 无法确定媒体预期大小，跳过严格校验: {final_path} (当前大小: {actual_size})")
+
+                if attempts > 1:
+                    logger.info(f"User API 重试下载成功 [{t_end-t_start:.1f}s]: {final_path}")
+                else:
+                    logger.info(f"User API 下载完成 [{t_end-t_start:.1f}s]: {final_path}")
+                return True
                 
             except Exception as e:
                 err_str = str(e)
                 # 捕获 BadMsgNotification 或由此引发的解析错误，这些通常需要重置 Session
                 is_mtproto_error = "BadMsgNotification" in err_str or "attribute 'users'" in err_str or "attribute 'bytes'" in err_str
-                
-                if attempts < max_attempts:
-                    # 识别不可重试的永久性错误 (通常是权限、Peer 异常或消息丢失)
-                    if isinstance(e, (ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden)) or \
-                       "CHANNEL_INVALID" in err_str or "CHANNEL_PRIVATE" in err_str or "MSG_ID_INVALID" in err_str:
-                        logger.error(f"User API 遇到不可重试的错误: {e}。这通常意味着当前 User API 账号没有该频道/群组的访问权限，或者消息已被删除。")
-                        return False
 
-                    if is_mtproto_error:
+                if _is_permanent_download_error(e):
+                    logger.error(f"User API 遇到不可重试的错误: {e}。这通常意味着账号没有访问权限、消息已删除或文件不允许下载。")
+                    return False
+
+                if attempts < max_attempts:
+                    if isinstance(e, FloodWait):
+                        wait_seconds = int(getattr(e, 'value', 0) or 0) + 1
+                        logger.warning(f"触发 FloodWait，等待 {wait_seconds}s 后重试...")
+                        await asyncio.sleep(wait_seconds)
+                    elif is_mtproto_error:
                         logger.warning(f"触发 MTProto 同步错误: {e}，正在强制重置客户端并重试...")
                         await _reset_client()
+                        await asyncio.sleep(1.5)
                     else:
-                        logger.warning(f"下载过程中发生异常: {e}，正在尝试第 {attempts} 次重试...")
-                    
-                    # 等待一下让网络或其他状态稳定
-                    await asyncio.sleep(1.5)
+                        delay = min(30, 2 ** (attempts - 1)) + random.uniform(0, 1)
+                        logger.warning(f"下载过程中发生异常: {e}，{delay:.1f}s 后尝试第 {attempts} 次重试...")
+                        await asyncio.sleep(delay)
                     continue
                 else:
                     # 最后一次尝试也失败了
@@ -488,8 +634,8 @@ def run_download_large_file(chat_id, message_id, final_path, progress_callback=N
         _loop
     )
     try:
-        # 大文件下载允许较长时间，但设置上限以防永久挂死 (默认 1 小时)
-        return future.result(timeout=3600)
+        # 大文件下载允许较长时间，但设置上限以防永久挂死
+        return future.result(timeout=DOWNLOAD_TIMEOUT + 120)
     except Exception as e:
         logger.error(f"User API 任务执行抛出异常: {e}", exc_info=True)
         return False
@@ -531,11 +677,85 @@ def run_download_message_media(chat_id, message_id, final_path, progress_callbac
         _loop
     )
     try:
-        downloaded_path = future.result(timeout=3600)
+        downloaded_path = future.result(timeout=DOWNLOAD_TIMEOUT + 120)
         return bool(downloaded_path and os.path.exists(downloaded_path))
     except Exception as e:
         logger.error(f"User API 链接下载任务失败: {e}", exc_info=True)
         return False
+
+
+def _is_forwards_restricted(exc):
+    """判断异常是否为“来源禁止转发”类错误。"""
+    if ChatForwardsRestricted is not None and isinstance(exc, ChatForwardsRestricted):
+        return True
+    return "CHAT_FORWARDS_RESTRICTED" in str(exc).upper()
+
+
+async def _forward_to_bot(bot_target, from_chat_id, message_id):
+    """把来源消息（含所属媒体组）转发到与 bot 的会话，交由常规下载流程处理。
+
+    Returns:
+        dict: {"ok": True, "count": N} 成功；失败时 {"ok": False, "reason": ...}，
+              reason 取值 not_found / no_media / protected / 其他错误串。
+    """
+    chat_key = str(from_chat_id)
+    if chat_key in _protected_chats:
+        return {"ok": False, "reason": "protected"}
+
+    client = get_pyrogram_client()
+    message = await client.get_messages(from_chat_id, message_id)
+    if not message:
+        return {"ok": False, "reason": "not_found"}
+
+    chat = getattr(message, 'chat', None)
+    if getattr(chat, 'has_protected_content', False):
+        _protected_chats.add(chat_key)
+        if getattr(chat, 'id', None) is not None:
+            _protected_chats.add(str(chat.id))
+        return {"ok": False, "reason": "protected"}
+
+    if not message.media:
+        return {"ok": False, "reason": "no_media"}
+
+    message_ids = [message_id]
+    if getattr(message, 'media_group_id', None):
+        try:
+            group = await message.get_media_group()
+            message_ids = sorted(m.id for m in group)
+        except Exception as e:
+            logger.warning(f"获取媒体组失败，仅转发单条: {e}")
+            message_ids = [message_id]
+
+    try:
+        await client.forward_messages(
+            chat_id=bot_target,
+            from_chat_id=from_chat_id,
+            message_ids=message_ids,
+        )
+        return {"ok": True, "count": len(message_ids)}
+    except Exception as e:
+        if _is_forwards_restricted(e):
+            _protected_chats.add(chat_key)
+            if getattr(chat, 'id', None) is not None:
+                _protected_chats.add(str(chat.id))
+            return {"ok": False, "reason": "protected"}
+        logger.warning(f"转发消息到 bot 失败: {e}")
+        return {"ok": False, "reason": str(e)}
+
+
+def run_forward_to_bot(bot_target, from_chat_id, message_id):
+    """同步封装：把来源消息转发到 bot 会话。"""
+    get_pyrogram_client()
+    future = asyncio.run_coroutine_threadsafe(
+        _forward_to_bot(bot_target, from_chat_id, message_id),
+        _loop
+    )
+    try:
+        return future.result(timeout=150)
+    except Exception as e:
+        logger.error(f"转发任务执行异常: {e}", exc_info=True)
+        return {"ok": False, "reason": str(e)}
+
 
 async def _get_chat_pinned_message(chat_id):
     """获取对话的置顶消息文本。"""

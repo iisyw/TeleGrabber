@@ -27,8 +27,10 @@ from bot.download import (
     reply_duplicate, download_large_via_user_api, save_small_file,
     build_single_record, _single_buttons,
     get_media_label, build_download_filename, save_media_metadata,
-    get_archive_ext,
+    get_archive_ext, save_telegram_thumbnail,
+    _safe_create_task, build_retry_context,
 )
+import task_manager
 import user_api
 
 
@@ -135,10 +137,69 @@ async def _process_link(update, context, args):
 
     chat_id, message_id = parsed
     status_message = await update.message.reply_text(
-        "⏳ 正在通过 User API 获取链接消息...",
+        "⏳ 正在转发消息并准备下载...",
         reply_to_message_id=update.message.message_id,
     )
     loop = asyncio.get_running_loop()
+
+    # 优先方案：用 User API 把消息转发回本会话，交给常规下载流程处理
+    # （小文件走 Bot API，大文件走 User API），减少 /link 专用的 User API 下载路径。
+    # 仅当来源禁止转发等情况失败时，才回退到 User API 直接下载。
+    # 注意：转发是由 User API 账号执行的，转发后的消息会落在该账号与 bot 的私聊里。
+    # 如果请求者不是 User API 账号本人，进度/结果会跑到另一个会话，因此直接走请求者会话的直下流程。
+    own_user_id = user_api.get_own_user_id()
+    can_forward = bool(own_user_id) and update.effective_user.id == own_user_id
+
+    if can_forward:
+        try:
+            forward_res = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: user_api.run_forward_to_bot(context.bot.username, chat_id, message_id),
+                ),
+                timeout=150,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"转发链接消息超时: {chat_id}/{message_id}")
+            forward_res = {"ok": False, "reason": "timeout"}
+    else:
+        logger.info(
+            f"请求者不是 User API 账号，跳过转发，直接在请求者会话使用 User API 下载: "
+            f"{chat_id}/{message_id}"
+        )
+        forward_res = {"ok": False, "reason": "other_user"}
+
+    if forward_res.get("ok"):
+        # 转发成功：消息会作为普通消息进入常规 handler，由其完成下载与保存
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=status_message.message_id,
+            text="✅ 已转发该消息，正在按常规流程下载保存...",
+        )
+        return
+
+    if forward_res.get("reason") == "no_media":
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=status_message.message_id,
+            text="❌ 该消息没有可下载的媒体内容。",
+        )
+        return
+
+    if forward_res.get("reason") == "protected":
+        logger.info(f"来源开启内容保护，跳过转发，直接使用 User API 下载: {chat_id}/{message_id}")
+        status_text = "⏳ 来源开启内容保护，正在通过 User API 直接下载..."
+    elif forward_res.get("reason") == "other_user":
+        status_text = "⏳ 正在通过 User API 直接下载..."
+    else:
+        logger.info(f"转发失败({forward_res.get('reason')})，回退到 User API 直接下载: {chat_id}/{message_id}")
+        status_text = "⏳ 来源限制转发，正在通过 User API 直接下载..."
+
+    await context.bot.edit_message_text(
+        chat_id=update.effective_chat.id,
+        message_id=status_message.message_id,
+        text=status_text,
+    )
 
     try:
         media_items = await asyncio.wait_for(
@@ -165,6 +226,8 @@ async def _process_link(update, context, args):
         media_info['download_method'] = DOWNLOAD_METHOD_USER
         media_info['link_chat_id'] = chat_id
         media_info['link_message_id'] = media_info['message_id']
+        media_info['original_message_id'] = media_info['message_id']
+        media_info['current_message_id'] = update.message.message_id
         media_info['status'] = 0
 
     if total > 1 and media_group_id:
@@ -202,6 +265,9 @@ async def _process_link(update, context, args):
         'file_id': media_info['file_id'],
         'file_unique_id': media_info['file_unique_id'],
         'media_type': media_info['media_type'],
+        'width': media_info.get('width'),
+        'height': media_info.get('height'),
+        'thumb_file_id': media_info.get('thumb_file_id'),
         'date_dir': date_dir,
         'ext_for_large': media_info.get('ext'),
         'final_filename': dup_info['filename'] if dup_info else None,
@@ -215,6 +281,8 @@ async def _process_link(update, context, args):
         'source_type': media_info.get('source_type'),
         'chat_id': update.effective_chat.id,
         'chat_type': update.effective_chat.type,
+        'current_message_id': update.message.message_id,
+        'original_message_id': media_info['message_id'],
         'message_id': update.message.message_id,
         'user_id': update.effective_user.id,
         'user_name': update.effective_user.username or update.effective_user.first_name,
@@ -249,6 +317,35 @@ async def _process_link(update, context, args):
     final_path = os.path.join(date_dir, final_filename)
     file_size = media_info.get('file_size', 0) or 0
     size_str = f"{file_size/1024/1024:.1f}MB" if file_size >= 1024*1024 else f"{file_size/1024:.1f}KB"
+    task_id = _safe_create_task(
+        user_id=update.effective_user.id,
+        user_name=update.effective_user.username or update.effective_user.first_name,
+        chat_id=update.effective_chat.id,
+        message_id=update.message.message_id,
+        media_group_id=media_info.get('media_group_id') or '',
+        file_unique_id=media_info['file_unique_id'],
+        filename=final_filename,
+        media_type=media_info['media_type'],
+        source_name=media_info.get('source_name'),
+        source_type=media_info.get('source_type'),
+        download_method='user_api',
+        total_bytes=file_size,
+        retry_context=build_retry_context(
+            record, media_info['media_type'], date_dir, record,
+            chat_id=update.effective_chat.id,
+            chat_type=update.effective_chat.type,
+            message_id=update.message.message_id,
+            current_message_id=update.message.message_id,
+            original_message_id=media_info['message_id'],
+            message_time=media_info.get('message_date'),
+            user_id=update.effective_user.id,
+            user_name=update.effective_user.username or update.effective_user.first_name,
+            media_group_id=media_info.get('media_group_id') or '',
+            bot_username=context.bot.username,
+            link_chat_id=chat_id,
+            link_message_id=media_info['message_id'],
+        ),
+    )
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
         message_id=status_message.message_id,
@@ -266,6 +363,8 @@ async def _process_link(update, context, args):
     progress_state = {"last_time": 0.0, "last_percent": -1}
 
     def progress(current, total_size):
+        if task_id:
+            task_manager.update_progress(task_id, current, total_size)
         percent = int(current * 100 / total_size) if total_size else 0
         now = time.time()
         # 节流：百分比变化且至少间隔 2 秒才更新，100% 强制更新，避免触发 Telegram 限流
@@ -296,6 +395,7 @@ async def _process_link(update, context, args):
         except Exception as e:
             logger.warning(f"调度进度更新失败: {e}")
 
+    error_msg = None
     try:
         success = await asyncio.wait_for(
             loop.run_in_executor(
@@ -306,6 +406,11 @@ async def _process_link(update, context, args):
         )
     except asyncio.TimeoutError:
         logger.error(f"User API 链接下载超时: {chat_id}/{media_info['message_id']}")
+        error_msg = "User API 链接下载超时"
+        success = False
+    except Exception as e:
+        logger.error(f"User API 链接下载异常: {e}", exc_info=True)
+        error_msg = str(e)
         success = False
     db_success = False
     if success:
@@ -317,8 +422,18 @@ async def _process_link(update, context, args):
         if db_success:
             record['final_filename'] = final_filename
             state.put_single_record(single_key, record)
+        else:
+            error_msg = "元数据保存失败"
 
     has_failed = not (success and db_success)
+    if task_id:
+        if not has_failed:
+            task_manager.finish_task(task_id, 'success', filename=final_filename)
+        else:
+            task_manager.finish_task(
+                task_id, 'failed',
+                error=error_msg or "User API 下载失败",
+            )
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
         message_id=status_message.message_id,
@@ -448,6 +563,10 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
         # 3. 小文件走 Bot API
         status_message = await _reply(update, f"{header}\n\n⏳ 正在保存...", parse_mode='Markdown')
         final_filename = await save_small_file(update, media_obj, media_type, date_dir, source_info, detect_ext)
+
+    # 视频/GIF/文档优先复用 Telegram 自带缩略图作为列表封面（图片由本地 Pillow 预热）
+    if final_filename and media_type != 'photo':
+        await save_telegram_thumbnail(context.bot, media_obj, media_obj.file_unique_id)
 
     # 登记记录并附带按钮
     record = build_single_record(media_obj, media_type, date_dir, source_info, ext_for_large,

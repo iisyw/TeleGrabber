@@ -11,11 +11,16 @@ from telegram.ext import (
 )
 import telegram.error
 
-from config import TOKEN, logger, get_connection_args, USER_API_ENABLED, WEB_PORT
+from config import (
+    TOKEN, logger, get_connection_args, USER_API_ENABLED,
+    WEB_HOST, WEB_PORT, TASK_RETAIN_DAYS,
+)
 import bot
 from utils import init_db
+from task_manager import fail_stale_tasks, prune_tasks
 import user_api
 import web_backend
+import runtime_state
 
 
 def build_application():
@@ -104,13 +109,14 @@ async def run_bot():
                 logger.critical("=" * 60)
                 logger.critical(f"经过 {max_retries} 次尝试仍无法连接 Telegram。")
                 logger.critical(f"错误详情: {e}")
-                logger.critical("如果你在网络受限区域，请在 data/.env 中配置代理，例如：")
-                logger.critical("    PROXY_URL=socks5h://127.0.0.1:1080")
-                logger.critical("    或 PROXY_URL=http://127.0.0.1:8123")
+                logger.critical("如果你在网络受限区域，请在 conf/config.toml 的 [telegram] 节配置 proxy_url，例如：")
+                logger.critical("    proxy_url = \"socks5h://127.0.0.1:1080\"")
+                logger.critical("    或 proxy_url = \"http://127.0.0.1:8123\"")
                 logger.critical("=" * 60)
                 return
 
     logger.info("机器人已启动，正在监听消息...")
+    runtime_state.mark_bot_started(app.bot)
 
     # 用一个永不完成的事件挂起，直到收到停止信号
     stop_event = asyncio.Event()
@@ -126,6 +132,7 @@ async def run_bot():
         await stop_event.wait()
     finally:
         logger.info("正在停止机器人...")
+        runtime_state.mark_bot_stopped()
         try:
             await app.updater.stop()
             await app.stop()
@@ -137,11 +144,13 @@ async def run_bot():
 def main() -> None:
     """主程序入口"""
     if not TOKEN:
-        logger.error("请在 data/.env 文件中设置 TELEGRAM_BOT_TOKEN 环境变量")
+        logger.error("请在 conf/config.toml 的 [telegram] 节设置 bot_token")
         return
 
     # 初始化数据库与媒体组状态
     init_db()
+    fail_stale_tasks()
+    prune_tasks(TASK_RETAIN_DAYS)
     bot.load_media_groups_collection()
 
     # 预启动 User API (MTProto)；放后台线程，避免首次登录阻塞
@@ -151,8 +160,8 @@ def main() -> None:
         logger.info("User API 初始化已在后台启动，如需登录请关注终端提示")
 
     # 启动 Web 管理后台 (独立线程，自带 uvicorn 事件循环)
-    logger.info(f"正在启动 Web 管理后台 (http://0.0.0.0:{WEB_PORT})...")
-    threading.Thread(target=web_backend.run_server, args=(WEB_PORT,), daemon=True).start()
+    logger.info(f"正在启动 Web 管理后台 (http://{WEB_HOST}:{WEB_PORT})...")
+    threading.Thread(target=web_backend.run_server, args=(WEB_HOST, WEB_PORT), daemon=True).start()
 
     logger.info("启动机器人...")
     try:

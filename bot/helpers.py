@@ -4,6 +4,7 @@ import time
 import functools
 
 from config import logger, ALLOWED_USERS, ENABLE_USER_RESTRICTION, GITHUB_REPO
+from utils import build_private_message_link
 from bot import state
 
 
@@ -91,9 +92,9 @@ def get_forward_source_info(message):
         if chat.username:
             info['source_username'] = chat.username
             info['source_link1'] = f"https://t.me/{chat.username}/{info['orig_msg_id']}"
-            info['source_link2'] = f"https://t.me/c/{chat.id}/{info['orig_msg_id']}"
+            info['source_link2'] = ''
         else:
-            info['source_link1'] = f"https://t.me/c/{chat.id}/{info['orig_msg_id']}"
+            info['source_link1'] = build_private_message_link(chat.id, info['orig_msg_id'])
             info['source_link2'] = ''
 
     elif origin_type == "chat":
@@ -105,9 +106,9 @@ def get_forward_source_info(message):
         if chat.username:
             info['source_username'] = chat.username
             info['source_link1'] = f"https://t.me/{chat.username}"
-            info['source_link2'] = f"https://t.me/c/{chat.id}"
+            info['source_link2'] = ''
         else:
-            info['source_link1'] = f"https://t.me/c/{chat.id}"
+            info['source_link1'] = build_private_message_link(chat.id)
             info['source_link2'] = ''
 
     elif origin_type == "user":

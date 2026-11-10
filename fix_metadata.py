@@ -16,7 +16,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from utils import DB_PATH, _db_lock, utc_to_local
+from utils import DB_PATH, _db_lock, utc_to_local, build_private_message_link
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────
@@ -162,12 +162,12 @@ async def backfill_phase1():
                 cid = getattr(chat, 'id', None)
                 link_msg_id = msg_id_val
                 if username:
-                    # 有用户名的频道：source_link1 用用户名格式，source_link2 用数字格式
+                    # 公开频道：使用用户名消息链接；不再生成 t.me/c 数字链接
                     new_link1 = f"https://t.me/{username}/{link_msg_id}"
-                    new_link2 = f"https://t.me/c/{cid}/{link_msg_id}"
+                    new_link2 = ''
                 elif cid:
-                    # 无用户名的频道
-                    new_link1 = f"https://t.me/c/{cid}/{link_msg_id}"
+                    # 私有频道：使用 t.me/c 数字链接
+                    new_link1 = build_private_message_link(cid, link_msg_id)
                     new_link2 = ''
 
             # 回填数据库
@@ -242,20 +242,19 @@ def backfill_phase3():
 
     updated = 0
     for record_id, source_link1, source_link2, source_id, msg_id, st in rows:
-        # 如果 source_link1 末尾已有 /数字（如 t.me/xxx/123），跳过
+        # 如果 source_link1 末尾已有 /数字（如 t.me/xxx/123），只清空废弃的 link2
         if source_link1 and re.search(r'/\d+$', source_link1):
-            continue
-        # 如果 source_link2 末尾已有 /数字，跳过
-        if source_link2 and re.search(r'/\d+$', source_link2):
+            if source_link2:
+                update_record(record_id, source_link2='')
+                updated += 1
             continue
 
-        # 构造新链接：原链接 + /message_id
+        # 只补全 source_link1；source_link2 已废弃
         new_link1 = f"{source_link1}/{msg_id}" if source_link1 else ''
-        new_link2 = f"{source_link2}/{msg_id}" if source_link2 else ''
-        update_record(record_id, source_link1=new_link1, source_link2=new_link2)
+        update_record(record_id, source_link1=new_link1, source_link2='')
         updated += 1
 
-    print(f"Phase 3: source_link1/source_link2 追加 msg_id: {updated} 条\n")
+    print(f"Phase 3: source_link1 追加 msg_id: {updated} 条\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -432,25 +431,26 @@ async def backfill_phase4():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Phase 5: 回填 source_username + source_link2（纯 SQL，零网络）
+# Phase 5: 回填 source_username / source_link1（纯 SQL，零网络）
 #
-# 从 source_link1 提取用户名，从 source_id+message_id 构造 source_link2
+# source_link2 已废弃，只补全用户名和缺失的来源链接。
 # ═══════════════════════════════════════════════════════════════════════
 
 def backfill_phase5():
-    """回填 source_username 和 source_link2。"""
+    """回填 source_username 和缺失的 source_link1。"""
     with _db_lock:
         conn = get_db()
         rows = conn.execute(
-            "SELECT id, source_link1, source_id, message_id, source_username, source_link2 "
+            "SELECT id, source_link1, source_id, message_id, source_username "
             "FROM media_metadata "
-            "WHERE source_username IS NULL OR source_username = '' OR source_link2 IS NULL OR source_link2 = ''"
+            "WHERE source_username IS NULL OR source_username = '' "
+            "OR source_link1 IS NULL OR source_link1 = ''"
         ).fetchall()
         conn.close()
 
     updated_username = 0
-    updated_link2 = 0
-    for record_id, source_link1, source_id, msg_id, cur_username, cur_link2 in rows:
+    updated_link1 = 0
+    for record_id, source_link1, source_id, msg_id, cur_username in rows:
         kwargs = {}
         # 回填 source_username：从 source_link1 提取（格式: https://t.me/username/...）
         if not cur_username and source_link1:
@@ -458,18 +458,14 @@ def backfill_phase5():
             if m and m.group(1) != 'c':
                 kwargs['source_username'] = m.group(1)
                 updated_username += 1
-        # 回填 source_link2：从 source_id + message_id 构造
-        if not cur_link2 and source_id and msg_id is not None:
-            if source_link1:
-                kwargs['source_link2'] = f"https://t.me/c/{source_id}/{msg_id}"
-            else:
-                kwargs['source_link1'] = f"https://t.me/c/{source_id}/{msg_id}"
-                kwargs['source_link2'] = ''
-            updated_link2 += 1
+        # 回填 source_link1：从 source_id + message_id 构造
+        if not source_link1 and source_id and msg_id is not None:
+            kwargs['source_link1'] = build_private_message_link(source_id, msg_id)
+            updated_link1 += 1
         if kwargs:
             update_record(record_id, **kwargs)
 
-    print(f"Phase 5: 回填 source_username: {updated_username} 条, source_link2: {updated_link2} 条\n")
+    print(f"Phase 5: 回填 source_username: {updated_username} 条, source_link1: {updated_link1} 条\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════

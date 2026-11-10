@@ -1,3 +1,12 @@
+FROM node:20-alpine AS web-builder
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -14,5 +23,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+COPY --from=web-builder /web/dist ./web/dist
 
 CMD ["python", "main.py"]

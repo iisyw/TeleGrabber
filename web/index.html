@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#17212b" />
+    <meta name="color-scheme" content="dark" />
+    <title>%VITE_APP_TITLE%</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      (function () {
+        var theme;
+        try { theme = localStorage.getItem('telegrabber-theme'); } catch (e) {}
+        if (theme !== 'light' && theme !== 'dark') {
+          theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+            ? 'light'
+            : 'dark';
+        }
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+.date-separator {
+  display: flex;
+  justify-content: center;
+  margin: 16px 0 12px;
+  user-select: none;
+
+  &::before,
+  &::after {
+    display: none;
+  }
+
+  .date-label {
+    padding: 3px 10px;
+    border-radius: 12px;
+    background: var(--date-bg);
+    color: var(--date-text);
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    backdrop-filter: blur(4px);
+  }
+}

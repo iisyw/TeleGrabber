@@ -1,5 +1,5 @@
-# 环境变量文件
-.env
+# 本地实际配置（含敏感信息）
+conf/config.toml
 
 # Python虚拟环境
 venv/
@@ -29,3 +29,10 @@ downloads/
 
 # 审计日志
 data/audit*.json
+
+# 缩略图（可重建的派生缓存）
+data/thumbs/
+
+# 前端依赖与构建产物
+web/node_modules/
+web/dist/

@@ -1,0 +1,121 @@
+.app-sidebar {
+  width: 68px;
+  min-width: 68px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 6px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-separator);
+  flex-shrink: 0;
+}
+
+.app-sidebar-brand {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--accent);
+
+  &:hover {
+    background: var(--sidebar-hover);
+  }
+}
+
+.app-sidebar-nav {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.app-sidebar-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 2px;
+  border-radius: 10px;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 10px;
+  line-height: 1.1;
+  transition: background var(--transition), color var(--transition);
+
+  svg {
+    display: block;
+  }
+
+  &:hover {
+    background: var(--sidebar-hover);
+    color: var(--text);
+  }
+
+  &.active {
+    background: var(--sidebar-active);
+    color: #fff;
+  }
+}
+
+.app-sidebar-theme {
+  width: 44px;
+  height: 40px;
+  margin-top: auto;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+
+  &:hover {
+    background: var(--sidebar-hover);
+    color: var(--text);
+  }
+}
+
+.app-sidebar-badge {
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 9px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.app-sidebar-dot {
+  position: absolute;
+  top: 6px;
+  right: 9px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+@media (max-width: 720px) {
+  .app-sidebar {
+    width: 56px;
+    min-width: 56px;
+    padding: 8px 4px;
+  }
+
+  .app-sidebar-item {
+    font-size: 9px;
+  }
+
+  .app-sidebar-theme {
+    width: 36px;
+    height: 36px;
+  }
+}

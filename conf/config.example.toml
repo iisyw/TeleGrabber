@@ -1,0 +1,64 @@
+# TeleGrabber 配置文件模板
+# 复制为 conf/config.toml 后填写；config.toml 已被 .gitignore 忽略。
+
+[telegram]
+# Telegram 机器人令牌（从 BotFather 获取）
+bot_token = ""
+
+# 从 https://my.telegram.org 获取以支持大文件下载 (>20MB)
+api_id = 0
+api_hash = ""
+
+# 代理设置（可选，如果网络无法直接连接 Telegram API，请取消注释并设置）
+# proxy_url = "socks5h://127.0.0.1:1080"
+# 或者使用 HTTP 代理
+# proxy_url = "http://127.0.0.1:8123"
+proxy_url = ""
+
+# 连接超时设置（以秒为单位，默认 30 秒）
+connection_timeout = 30
+
+# 下载失败重试次数（默认 3 次）
+download_retries = 3
+# 单次下载总超时（秒）
+download_timeout = 3600
+# 连续无进度多久判定为卡死（秒）
+download_stall_timeout = 180
+
+# 允许使用机器人的用户列表（用户名或用户 ID）
+# 如果为空，则允许所有用户使用
+# 例如: ["username1", "username2", "123456789"]
+allowed_users = []
+
+# 允许下载的文件扩展名白名单
+# 例如: [".zip", ".rar", ".7z", ".apk", ".tar", ".gz", ".tgz", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".exe", ".iso"]
+allowed_file_extensions = [
+  ".zip", ".rar", ".7z", ".apk", ".tar", ".gz", ".tgz",
+  ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".exe", ".iso",
+]
+
+[storage]
+# 图片保存目录（默认为 "downloads"）
+save_dir = "downloads"
+# 运行数据目录（SQLite、Pyrogram session、审计日志、缩略图）
+data_dir = "data"
+
+[web]
+# Web 管理后台监听地址
+# 默认只监听本机，最安全；如确需局域网/容器访问，再改为 "0.0.0.0"
+host = "127.0.0.1"
+# Web 管理后台端口（默认为 5000）
+port = 5000
+
+[tasks]
+# 终态下载任务保留天数（0 表示永久保留）
+retain_days = 30
+# 任务重试并发数（1-10）
+retry_concurrency = 2
+# 下载前要求的最小剩余磁盘空间（MB）
+min_free_mb = 512
+
+[audit]
+# 审计日志：记录每条收到的消息的源信息和完整原始数据到 data/audit_*.json
+# 关闭设为 false
+enabled = false

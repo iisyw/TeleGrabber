@@ -1,0 +1,234 @@
+#sidebar {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-separator);
+}
+
+.sidebar-header {
+  height: var(--top-bar-height);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--sidebar-separator);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.brand-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.source-type-tabs {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 12px 4px;
+  border-bottom: 1px solid var(--sidebar-separator);
+}
+
+.source-type-tab {
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+
+  &:hover {
+    background: var(--sidebar-hover);
+    color: var(--text);
+  }
+
+  &.active {
+    background: var(--accent);
+    color: #fff;
+  }
+}
+
+.source-list {
+  flex: 1;
+  padding: 6px 0;
+  overflow-y: auto;
+}
+
+.source-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: background var(--transition);
+
+  &:hover {
+    background: var(--sidebar-hover);
+
+    .source-actions {
+      display: flex;
+    }
+  }
+
+  &.active {
+    background: var(--sidebar-active);
+    color: #fff;
+
+    .source-sub,
+    .source-count {
+      color: rgba(255, 255, 255, 0.85);
+    }
+
+    .source-badge {
+      background: rgba(255, 255, 255, 0.16);
+      color: #fff;
+    }
+
+    .source-count {
+      background: rgba(255, 255, 255, 0.12);
+    }
+  }
+
+  .source-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .source-name {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .source-name-text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .source-badge {
+    flex-shrink: 0;
+    margin-right: 0;
+    padding: 1px 5px;
+    font-size: 10px;
+  }
+
+  .source-sub {
+    margin-top: 2px;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .source-count {
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+}
+
+.source-pin {
+  flex-shrink: 0;
+  margin-right: 2px;
+  color: #f7b731;
+}
+
+.source-tag-protected {
+  flex-shrink: 0;
+  display: inline-block;
+  margin-left: 2px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(255, 89, 90, 0.16);
+  color: var(--danger);
+  font-size: 9px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
+.source-failed {
+  color: var(--danger);
+}
+
+.source-actions {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: none;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--sidebar-hover);
+  box-shadow: -10px 0 12px var(--sidebar-hover);
+  transform: translateY(-50%);
+}
+
+.source-item.active .source-actions {
+  background: var(--sidebar-active);
+  box-shadow: -10px 0 12px var(--sidebar-active);
+}
+
+.source-action {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--sidebar-hover);
+    color: var(--text);
+  }
+
+  &.active {
+    color: #f7b731;
+  }
+
+  &.danger {
+    color: var(--danger);
+  }
+}
+
+.source-visible-toggle {
+  margin: 8px 12px 10px;
+  padding: 7px 10px;
+  border: 1px dashed var(--input-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--text-muted);
+    color: var(--text);
+  }
+}
+
+@media (max-width: 720px) {
+  #sidebar {
+    display: none;
+  }
+}

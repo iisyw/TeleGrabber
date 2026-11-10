@@ -1,0 +1,142 @@
+.message {
+  display: flex;
+  gap: 8px;
+  padding-left: 8px;
+}
+
+.msg-avatar {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 4px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.bubble {
+  position: relative;
+  max-width: min(420px, calc(100% - 56px));
+  border-radius: var(--bubble-radius);
+  background: var(--bubble-bg);
+  box-shadow: var(--bubble-shadow);
+  transition: background var(--transition);
+
+  &:hover {
+    background: var(--bubble-hover);
+
+    .bubble-del {
+      visibility: visible;
+    }
+  }
+}
+
+.msg-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.msg-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 8px;
+
+  &--empty {
+    min-height: 24px;
+    padding: 2px 8px;
+  }
+}
+
+.msg-name-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.caption {
+  padding: 6px 8px 2px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  word-wrap: break-word;
+}
+
+.timestamp {
+  padding: 6px 6px 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: right;
+  user-select: none;
+
+  > div {
+    line-height: 1.5;
+  }
+}
+
+.timestamp-count {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.bubble-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 2px 8px 4px;
+
+  .timestamp {
+    flex: 1;
+    padding: 0;
+  }
+}
+
+.bubble-del {
+  position: static;
+  z-index: 10;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 89, 90, 0.12);
+  color: var(--danger);
+  line-height: 1;
+  cursor: pointer;
+  visibility: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition), visibility var(--transition);
+
+  svg {
+    display: block;
+  }
+
+  &:hover {
+    background: var(--danger);
+    color: #fff;
+  }
+}
+
+@media (max-width: 720px) {
+  .bubble {
+    max-width: 100%;
+  }
+}
