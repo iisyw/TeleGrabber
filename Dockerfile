@@ -15,6 +15,11 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV TZ=Asia/Shanghai
 
+# 视频封面抽帧与 ffprobe 尺寸探测
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && pip install -i https://mirrors.aliyun.com/pypi/simple/ -U pip \
     && pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/

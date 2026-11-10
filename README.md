@@ -127,6 +127,7 @@ docker-compose down
 Docker 部署的优点：
 
 - 无需手动安装 Python 和依赖
+- 镜像内置 ffmpeg，支持视频封面生成与视频尺寸探测
 - 环境隔离，不会影响系统环境
 - 自动重启服务
 - 数据持久化存储在宿主机的 downloads 目录
