@@ -246,6 +246,10 @@ def failed_task_ids(limit=20, source_name=None, media_group_id=None, batch_id=No
     return [row[0] for row in rows]
 
 
+_prune_thread = None
+_prune_stop_event = threading.Event()
+
+
 def prune_tasks(retain_days=30):
     """删除超过保留期的终态任务，避免任务表无限增长。"""
     _ensure_table()
@@ -266,7 +270,39 @@ def prune_tasks(retain_days=30):
             conn.close()
 
 
-def list_tasks(status=None, limit=50, offset=0, source_name=None, media_group_id=None):
+def start_task_prune_scheduler(retain_days=30, interval_seconds=86400):
+    """启动后台定时清理线程，定期清理过期的终态任务（默认每 24 小时执行一次）。"""
+    global _prune_thread
+    if not retain_days or retain_days <= 0:
+        return
+    if _prune_thread and _prune_thread.is_alive():
+        return
+
+    _prune_stop_event.clear()
+
+    def _worker():
+        interval_hours = max(1, interval_seconds // 3600)
+        logger.info(f"下载任务定期清理调度已启动，每 {interval_hours} 小时清理一次 (保留 {retain_days} 天)")
+        while not _prune_stop_event.is_set():
+            if _prune_stop_event.wait(timeout=interval_seconds):
+                break
+            try:
+                cleaned = prune_tasks(retain_days)
+                if cleaned > 0:
+                    logger.info(f"定时清理完成：删除了 {cleaned} 条过期下载任务")
+            except Exception as e:
+                logger.error(f"定时清理下载任务异常: {e}")
+
+    _prune_thread = threading.Thread(target=_worker, name="task-pruner", daemon=True)
+    _prune_thread.start()
+
+
+def stop_task_prune_scheduler():
+    """停止后台任务清理线程。"""
+    _prune_stop_event.set()
+
+
+def list_tasks(status=None, limit=50, offset=0, source_name=None, media_group_id=None, batch_id=None):
     _ensure_table()
     limit = max(1, min(int(limit or 50), 200))
     offset = max(0, int(offset or 0))
@@ -281,6 +317,9 @@ def list_tasks(status=None, limit=50, offset=0, source_name=None, media_group_id
     if media_group_id:
         conditions.append("media_group_id = ?")
         params.append(media_group_id)
+    if batch_id:
+        conditions.append("batch_id = ?")
+        params.append(batch_id)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     conn = utils.get_db_connection()

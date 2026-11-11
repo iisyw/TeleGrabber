@@ -79,8 +79,8 @@ def get_media(
     cursor_id: Optional[int] = None,
 ):
     """获取媒体记录列表，支持按原始消息时间(message_time)或下载时间(datetime)排序。"""
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         cursor = conn.cursor()
 
         query = ("SELECT id, user_id, user_name, filename, datetime, message_time, "
@@ -139,6 +139,9 @@ def get_media(
                     "(COALESCE(message_time, datetime) = ? AND id < ?))"
                 )
                 params.extend([cursor_time, cursor_time, cursor_id])
+            else:
+                conditions.append("id < ?")
+                params.append(cursor_id)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
@@ -153,7 +156,6 @@ def get_media(
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        conn.close()
 
         return ok([
             {
@@ -173,7 +175,9 @@ def get_media(
         ])
     except Exception as e:
         logger.error("获取媒体记录失败: %s", e)
-        raise HTTPException(status_code=500, detail="获取媒体记录失败")
+        raise BusinessError(INTERNAL_SERVER_ERROR, "获取媒体记录失败")
+    finally:
+        conn.close()
 
 
 @router.get("/api/stats")
@@ -189,8 +193,8 @@ def get_stats(
     tag: Optional[str] = None,
 ):
     """获取媒体统计信息，筛选参数与 /api/media 一致。"""
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         cursor = conn.cursor()
 
         query = ("SELECT COUNT(*), "
@@ -233,11 +237,12 @@ def get_stats(
 
         cursor.execute(query, params)
         row = cursor.fetchone()
-        conn.close()
         return ok({"total_count": row[0], "message_count": row[1], "filtered": bool(conditions)})
     except Exception as e:
         logger.error("获取统计信息失败: %s", e)
-        raise HTTPException(status_code=500, detail="获取统计信息失败")
+        raise BusinessError(INTERNAL_SERVER_ERROR, "获取统计信息失败")
+    finally:
+        conn.close()
 
 
 class MediaMetaUpdate(BaseModel):
@@ -295,25 +300,51 @@ def update_media_meta(media_id: int, payload: MediaMetaUpdate):
 
 @router.get("/api/duplicates")
 def get_duplicates(limit: int = Query(50, ge=1, le=200)):
+    """获取系统拦截跳过的重复下载记录。"""
     conn = get_db_connection()
     try:
+        # 查询在任务中心中被拦截跳过的重复下载任务
         rows = conn.execute(
-            "SELECT file_unique_id, COUNT(*) AS cnt, COALESCE(SUM(file_size), 0), "
-            "GROUP_CONCAT(filename, char(31)), GROUP_CONCAT(COALESCE(source_name, ''), char(31)) "
-            "FROM media_metadata WHERE file_unique_id IS NOT NULL AND file_unique_id != '' "
-            "GROUP BY file_unique_id HAVING COUNT(*) > 1 "
-            "ORDER BY cnt DESC, file_unique_id LIMIT ?",
+            "SELECT file_unique_id, COUNT(*) AS cnt, COALESCE(MAX(total_bytes), 0), "
+            "GROUP_CONCAT(COALESCE(filename, ''), char(31)), "
+            "GROUP_CONCAT(COALESCE(source_name, ''), char(31)) "
+            "FROM download_tasks WHERE status = 'skipped' AND file_unique_id IS NOT NULL AND file_unique_id != '' "
+            "GROUP BY file_unique_id "
+            "ORDER BY cnt DESC, MAX(updated_at) DESC LIMIT ?",
             (limit,),
         ).fetchall()
+        # 若暂无 skipped 任务，兜底查询历史媒体库中的重复项
+        if not rows:
+            rows = conn.execute(
+                "SELECT file_unique_id, COUNT(*) AS cnt, COALESCE(SUM(file_size), 0), "
+                "GROUP_CONCAT(filename, char(31)), GROUP_CONCAT(COALESCE(source_name, ''), char(31)) "
+                "FROM media_metadata WHERE file_unique_id IS NOT NULL AND file_unique_id != '' "
+                "GROUP BY file_unique_id HAVING COUNT(*) > 1 "
+                "ORDER BY cnt DESC, file_unique_id LIMIT ?",
+                (limit,),
+            ).fetchall()
     finally:
         conn.close()
+
+    def _split_clean(val):
+        if not val:
+            return []
+        items = [x for x in val.split(chr(31)) if x]
+        seen = set()
+        res = []
+        for x in items:
+            if x not in seen:
+                seen.add(x)
+                res.append(x)
+        return res
+
     return ok([
         {
             "file_unique_id": row[0],
             "count": row[1],
             "total_bytes": row[2],
-            "filenames": (row[3] or '').split(chr(31)),
-            "sources": (row[4] or '').split(chr(31)),
+            "filenames": _split_clean(row[3]),
+            "sources": _split_clean(row[4]),
         }
         for row in rows
     ])
@@ -336,13 +367,17 @@ def delete_media(id: int):
 @router.delete("/api/media_group/{media_group_id}")
 def delete_media_group(media_group_id: str):
     """删除整个媒体组及其物理文件。"""
+    group_id = (media_group_id or "").strip()
+    if not group_id:
+        raise BusinessError(VALIDATION_FAILED, "媒体组 ID 不能为空")
+
     try:
         conn = get_db_connection()
         try:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT file_unique_id FROM media_metadata WHERE media_group_id = ?",
-                (media_group_id,),
+                (group_id,),
             )
             unique_ids = [row[0] for row in cursor.fetchall()]
         finally:

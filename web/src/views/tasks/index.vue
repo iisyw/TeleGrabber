@@ -17,7 +17,7 @@
         >
           {{ notifyEnabled ? '通知已开启' : '开启通知' }}
         </button>
-        <button class="btn" @click="load">刷新</button>
+        <button class="btn" @click="load(false)">刷新</button>
         <button
           v-if="counts.failed"
           class="btn"

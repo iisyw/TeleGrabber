@@ -17,12 +17,14 @@ def get_tasks(
     status: Optional[str] = None,
     source_name: Optional[str] = None,
     media_group_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     tasks, total, counts = task_manager.list_tasks(
         status=status, limit=limit, offset=offset,
         source_name=source_name, media_group_id=media_group_id,
+        batch_id=batch_id,
     )
     for task in tasks:
         task["can_pause"] = retry_service.is_retry_queued(task["id"])

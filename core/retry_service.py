@@ -18,7 +18,7 @@ from telegram.request import HTTPXRequest
 
 from .config import (
     logger, SAVE_DIR, USER_API_ENABLED, TASK_RETRY_CONCURRENCY, TASK_MIN_FREE_MB,
-    TOKEN, DOWNLOAD_TIMEOUT, PROXY,
+    TOKEN, DOWNLOAD_TIMEOUT, TIMEOUT, PROXY,
 )
 from .media_files import (
     generate_temp_filename, get_video_extension, get_image_extension,
@@ -360,10 +360,12 @@ def _check_disk(expected_size):
 def _download_via_bot(file_id, final_path):
     """使用独立 Bot 实例通过 Bot API 下载小文件，作为 User API 失败后的回退。"""
     async def run():
-        kwargs = {}
-        if PROXY:
-            kwargs["request"] = HTTPXRequest(proxy=PROXY)
-        bot = Bot(TOKEN, **kwargs)
+        request = HTTPXRequest(
+            proxy=PROXY,
+            read_timeout=DOWNLOAD_TIMEOUT,
+            connect_timeout=TIMEOUT,
+        )
+        bot = Bot(TOKEN, request=request)
         async with bot:
             tg_file = await bot.get_file(file_id)
             await asyncio.wait_for(

@@ -19,8 +19,8 @@ router = APIRouter()
 @router.get("/api/sources")
 def get_sources(source_type: Optional[str] = None):
     """一次返回来源列表及各来源媒体/消息计数，避免前端 N+1 请求。"""
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         cursor = conn.cursor()
         query = (
             "SELECT m.source_name, m.source_type, COUNT(*) AS media_count, "
@@ -61,7 +61,6 @@ def get_sources(source_type: Optional[str] = None):
             total_params.append(source_type)
         cursor.execute(total_query, total_params)
         totals = cursor.fetchone()
-        conn.close()
         return ok({
             "sources": [
                 {
@@ -84,6 +83,8 @@ def get_sources(source_type: Optional[str] = None):
     except Exception as e:
         logger.error("获取来源列表失败: %s", e)
         raise BusinessError(INTERNAL_SERVER_ERROR, "获取来源列表失败")
+    finally:
+        conn.close()
 
 
 class SourceMetaUpdate(BaseModel):

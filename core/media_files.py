@@ -35,27 +35,25 @@ def get_save_directory(user, source_name=None, source_type=None):
 
 def get_video_extension(file_path):
     """检测视频文件的实际格式并返回扩展名。"""
-    if not mimetypes.inited:
-        mimetypes.init()
-
-    video_signatures = {
-        b'\x00\x00\x00\x18\x66\x74\x79\x70\x6D\x70\x34\x32': '.mp4',
-        b'\x00\x00\x00\x1C\x66\x74\x79\x70\x6D\x70\x34\x32': '.mp4',
-        b'\x00\x00\x00\x20\x66\x74\x79\x70\x69\x73\x6F\x6D': '.mp4',
-        b'\x1A\x45\xDF\xA3': '.webm',
-        b'\x00\x00\x00\x14\x66\x74\x79\x70\x71\x74\x20\x20': '.mov',
-        b'\x52\x49\x46\x46': '.avi',
-    }
-
     try:
         with open(file_path, 'rb') as f:
-            header = f.read(12)
-            for sig, ext in video_signatures.items():
-                if header.startswith(sig):
-                    return ext
+            header = f.read(32)
+            if len(header) >= 8 and header[4:8] == b'ftyp':
+                brand = header[8:12]
+                if brand == b'qt  ':
+                    return '.mov'
+                return '.mp4'
+            if header.startswith(b'\x1a\x45\xdf\xa3'):
+                return '.webm'
+            if header.startswith(b'RIFF') and len(header) >= 12 and header[8:12] == b'AVI ':
+                return '.avi'
+            if header.startswith(b'FLV\x01'):
+                return '.flv'
     except Exception as e:
         logger.error(f"读取文件头部错误: {e}")
 
+    if not mimetypes.inited:
+        mimetypes.init()
     mime_type, _ = mimetypes.guess_type(file_path)
     if mime_type and mime_type.startswith('video/'):
         ext = mimetypes.guess_extension(mime_type)

@@ -8,12 +8,10 @@ import threading
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
-from core.config import SAVE_DIR
+from core.config import DATA_DIR, SAVE_DIR
 
-# 媒体组状态文件
-MEDIA_GROUP_STATE_FILE = os.path.join(SAVE_DIR, "media_groups_state.json")
-# 媒体组收集状态文件
-MEDIA_GROUP_COLLECTION_FILE = os.path.join(SAVE_DIR, "media_groups_collection.json")
+# 媒体组收集状态文件（存储于运行数据目录）
+MEDIA_GROUP_COLLECTION_FILE = os.path.join(DATA_DIR, "media_groups_collection.json")
 # 媒体组收集等待时间（秒）
 MEDIA_GROUP_COLLECT_TIME = 2
 

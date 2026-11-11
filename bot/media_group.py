@@ -91,11 +91,14 @@ def save_media_groups_collection(collection=None):
         collection = state.active_collections
 
     try:
+        with state.media_group_lock:
+            items_snapshot = list(collection.items())
+
         os.makedirs(os.path.dirname(state.MEDIA_GROUP_COLLECTION_FILE), exist_ok=True)
         temp_file = f"{state.MEDIA_GROUP_COLLECTION_FILE}.tmp"
         with open(temp_file, 'w', encoding='utf-8') as f:
             serializable_collection = {}
-            for key, value in collection.items():
+            for key, value in items_snapshot:
                 serializable_collection[key] = {
                     'chat_id': value['chat_id'],
                     'user_id': value['user_id'],
@@ -522,6 +525,26 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                     items_status[index - 1] = 2
                     media_info['status'] = 2
                     processed_count['value'] += 1
+                try:
+                    tid = task_manager.create_task(
+                        user_id=user_obj.id if user_obj else None,
+                        user_name=user_obj.username if user_obj else None,
+                        chat_id=group_info.get('chat_id'),
+                        message_id=media_info.get('current_message_id') or media_info.get('message_id'),
+                        media_group_id=media_group_id,
+                        batch_id=batch_id,
+                        file_unique_id=file_unique_id,
+                        filename=fname,
+                        media_type=media_info.get('media_type'),
+                        source_name=src,
+                        source_type=group_info.get('source_type'),
+                        download_method=DOWNLOAD_METHOD_BOT,
+                        total_bytes=media_info.get('file_size', 0) or 0,
+                        item_index=index,
+                    )
+                    task_manager.update_task(tid, status='skipped', error='检测到重复文件已跳过')
+                except Exception as te:
+                    logger.warning(f"记录媒体组跳过任务失败: {te}")
                 update_ui_async()
                 return True
         except Exception as e:

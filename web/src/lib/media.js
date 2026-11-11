@@ -120,8 +120,8 @@ export function buildDisplayGroups(items) {
       curDate = d;
       groups.push({ type: 'date', date: d, items: [] });
     }
-    const gid = item.media_group_id;
-    const isGrouped = gid && gid !== 'single' && gid !== '';
+    const gid = (item.media_group_id || '').trim();
+    const isGrouped = Boolean(gid);
 
     if (isGrouped) {
       const last = groups.length > 0 ? groups[groups.length - 1] : null;

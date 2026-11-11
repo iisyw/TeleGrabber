@@ -51,10 +51,13 @@ def _compute_health():
     missing_thumbs = 0
     missing_dimensions = 0
     for filename, source_name, source_type, unique_id, media_type, width, height, size in rows:
-        rel = _media_relative_path(source_name, source_type, filename)
-        path = os.path.abspath(os.path.join(root, rel))
-        if not path.startswith(root + os.sep) or not os.path.exists(path):
+        if not filename:
             missing_files += 1
+        else:
+            rel = _media_relative_path(source_name, source_type, filename)
+            path = os.path.abspath(os.path.join(root, rel))
+            if not path.startswith(root + os.sep) or not os.path.exists(path):
+                missing_files += 1
         if (
             media_type in ("photo", "video", "animation")
             and unique_id and not os.path.exists(get_thumb_path(unique_id))

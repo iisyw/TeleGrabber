@@ -91,7 +91,14 @@ export function useTasks() {
         limit,
         offset: 0,
       });
-      tasks.value = (data && data.tasks) || [];
+      const nextTasks = (data && data.tasks) || [];
+      if (tasks.value.length <= limit) {
+        tasks.value = nextTasks;
+      } else {
+        // 用户已展开加载超过 200 条长列表时，增量合并更新已有状态，避免长列表被自动截断缩回
+        const nextMap = new Map(nextTasks.map((t) => [t.id, t]));
+        tasks.value = tasks.value.map((t) => nextMap.get(t.id) || t);
+      }
       applyCounts((data && data.counts) || {});
       total.value = (data && data.total) || 0;
       error.value = '';

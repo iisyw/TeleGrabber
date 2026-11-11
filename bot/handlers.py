@@ -458,7 +458,7 @@ async def link_command(update, context) -> None:
 
 @restricted
 async def handle_text_message(update, context) -> None:
-    """自动识别文本中的 Telegram 消息链接并下载，否则用 LLM 分析转发文本。"""
+    """自动识别文本中的 Telegram 消息链接并处理下载，其他纯文本提示不支持。"""
     message = update.message
     text = message.text or ''
     append_audit('text', message=message, note=f"text_len:{len(text)}")
@@ -537,6 +537,24 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
         record = build_single_record(media_obj, media_type, date_dir, source_info, ext_for_large, chat, message)
         record['is_dup'] = True
         state.put_single_record(single_key, record)
+        try:
+            tid = _safe_create_task(
+                user_id=update.effective_user.id if update.effective_user else None,
+                user_name=(update.effective_user.username or update.effective_user.first_name) if update.effective_user else None,
+                chat_id=chat.id,
+                message_id=message.message_id,
+                media_group_id='',
+                file_unique_id=media_obj.file_unique_id,
+                filename=record.get('final_filename'),
+                media_type=media_type,
+                source_name=source_info.get('source_name'),
+                source_type=source_info.get('source_type'),
+                download_method=DOWNLOAD_METHOD_BOT,
+                total_bytes=getattr(media_obj, 'file_size', 0) or 0,
+            )
+            task_manager.update_task(tid, status='skipped', error='检测到重复文件已跳过')
+        except Exception as te:
+            logger.warning(f"记录单文件跳过任务失败: {te}")
         await update.message.reply_text(
             dup_text, parse_mode='Markdown', disable_web_page_preview=True,
             reply_to_message_id=message.message_id,

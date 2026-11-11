@@ -311,12 +311,6 @@ def _message_media_info(message):
     }
 
 
-async def _get_message_media_info(chat_id, message_id):
-    client = get_pyrogram_client()
-    message = await client.get_messages(chat_id, message_id)
-    return _message_media_info(message)
-
-
 async def _get_link_media_items(chat_id, message_id):
     client = get_pyrogram_client()
     message = await client.get_messages(chat_id, message_id)
@@ -634,20 +628,6 @@ def run_download_large_file(chat_id, message_id, final_path, progress_callback=N
         return False
 
 
-def run_get_message_media_info(chat_id, message_id):
-    """同步获取 User API 可见消息的媒体信息。"""
-    get_pyrogram_client()
-    future = asyncio.run_coroutine_threadsafe(
-        _get_message_media_info(chat_id, message_id),
-        _loop
-    )
-    try:
-        return future.result(timeout=120)
-    except Exception as e:
-        logger.error(f"User API 获取链接消息失败: {e}", exc_info=True)
-        return None
-
-
 def run_get_link_media_items(chat_id, message_id):
     """同步获取链接消息对应的媒体列表；媒体组会展开为整组。"""
     get_pyrogram_client()
@@ -750,33 +730,6 @@ def run_forward_to_bot(bot_target, from_chat_id, message_id):
         return {"ok": False, "reason": str(e)}
 
 
-async def _get_chat_pinned_message(chat_id):
-    """获取对话的置顶消息文本。"""
-    try:
-        client = get_pyrogram_client()
-        chat = await client.get_chat(chat_id)
-        if chat.pinned_message and chat.pinned_message.text:
-            return chat.pinned_message.text
-        return None
-    except Exception as e:
-        logger.warning(f"获取置顶消息失败 {chat_id}: {e}")
-        return None
-
-
-def run_get_chat_pinned_message(chat_id):
-    """同步获取对话置顶消息文本。"""
-    get_pyrogram_client()
-    future = asyncio.run_coroutine_threadsafe(
-        _get_chat_pinned_message(chat_id),
-        _loop
-    )
-    try:
-        return future.result(timeout=30)
-    except Exception as e:
-        logger.error(f"获取置顶消息失败: {e}")
-        return None
-
-
 def stop_user_api():
     """停止 User API 客户端 (优雅退出)"""
     global _app, _loop
@@ -788,17 +741,8 @@ def stop_user_api():
             logger.info("User API 客户端已安全停止")
         except Exception as e:
             logger.error(f"停止 User API 客户端失败: {e}")
-
-
-async def build_pyrogram_client():
-    """为一次性脚本（如回填）创建独立的 Client 实例，不走单例。"""
-    app = Client(
-        "telegrabber_user",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        proxy=_get_proxy_dict(),
-        workdir=DATA_DIR,
-        sleep_threshold=60,
-    )
-    await app.start()
-    return app
+    if _loop and _loop.is_running():
+        try:
+            _loop.call_soon_threadsafe(_loop.stop)
+        except Exception as e:
+            logger.error(f"停止 User API 事件循环失败: {e}")

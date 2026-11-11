@@ -45,17 +45,17 @@
     </div>
 
     <div class="storage-section">
-      <div class="storage-section-title">重复文件</div>
-      <div v-if="!duplicates.length" class="manage-empty">暂无重复文件</div>
+      <div class="storage-section-title">重复拦截记录</div>
+      <div v-if="!duplicates.length" class="manage-empty">暂无重复拦截记录</div>
       <div v-else class="duplicate-list">
         <div v-for="group in duplicates" :key="group.file_unique_id" class="duplicate-item">
           <div class="duplicate-main">
             <div class="duplicate-title">
-              {{ group.count }} 份 · {{ formatBytes(group.total_bytes) }}
+              {{ group.count > 1 ? `${group.count} 次拦截` : '已拦截' }} · {{ formatBytes(group.total_bytes) }}
             </div>
-            <div class="duplicate-files">{{ group.filenames.join(' / ') }}</div>
+            <div class="duplicate-files">{{ (group.filenames && group.filenames.length ? group.filenames.join(' / ') : group.file_unique_id) }}</div>
           </div>
-          <div class="duplicate-sources">{{ group.sources.join(' / ') }}</div>
+          <div class="duplicate-sources">{{ (group.sources && group.sources.length ? group.sources.join(' / ') : '未知来源') }}</div>
         </div>
       </div>
     </div>
