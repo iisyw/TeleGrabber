@@ -14,7 +14,7 @@ TeleGrabber 是一个 Telegram 机器人，用于自动保存接收到的图片�
 - **消息链接下载**：支持 `/link` 命令和自动识别文本中的 `t.me` 链接，通过 User API 下载私密频道/禁止转发消息中的媒体
 - **通用文件下载白名单**：通过 `ALLOWED_FILE_EXTENSIONS` 配置允许下载的文件扩展名（默认支持 zip/rar/7z/apk/pdf 等），非图片/视频文档根据白名单决定是否下载
 - **SQLite 数据库**：持久化存储所有媒体元数据，支持全局去重与跨会话追踪
-- **审计日志**：调试时可通过 `AUDIT_LOG=true` 开启，收到的消息会按来源类型写入 `data/audit_{channel,bot,group,private,other}.json`；默认关闭
+- **审计日志**：调试时可在 `conf/config.toml` 设置 `[audit] enabled = true`，收到的消息会按来源类型写入 `data/audit_{channel,bot,group,private,other}.json`；默认关闭
 - **智能去重与安全删除**：自动跳过库中已存在的资源；"删除"操作仅撤销本次下载，绝不触及历史存量数据
 - **单条 / 媒体组操作按钮**：下载完成后提供重新下载、强制重下、删除等即时操作；重新下载时保留信息头
 - **Web 管理后台**：内置基于 FastAPI 的可视化管理终端，支持大图/视频预览、媒体组聚合展示与远程一键删除（个人本地使用，不启用应用内登录）
@@ -28,13 +28,23 @@ TeleGrabber 是一个 Telegram 机器人，用于自动保存接收到的图片�
 TeleGrabber/
 │
 ├── main.py                # 主程序入口
-├── config.py              # 配置管理（含白名单、审计开关）
-├── utils.py               # 数据库、文件检测、审计日志
-├── user_api.py            # MTProto (User API) 下载引擎
-├── web_backend.py         # Web 后端服务 (FastAPI)
-├── api_response.py        # 统一响应/错误码/requestId
+├── core/                  # 核心业务模块
+│   ├── config.py          # 配置管理（含白名单、审计开关）
+│   ├── config_loader.py   # TOML 解析与校验
+│   ├── utils.py           # SQLite schema、媒体落库、删除、FTS
+│   ├── media_files.py     # 保存目录、文件名与扩展名
+│   ├── telegram_meta.py   # 消息时间/ID、私有频道链接
+│   ├── thumbnails.py      # 缩略图生成与缓存
+│   ├── audit.py           # 审计日志
+│   ├── user_api.py        # MTProto (User API) 下载引擎
+│   ├── task_manager.py    # 下载任务持久化
+│   └── retry_service.py   # 任务重试队列
+├── webapp/                # FastAPI 应用组装与路由
+│   ├── app.py             # 中间件、异常、静态资源、SPA 回退
+│   ├── api_response.py    # 统一响应/错误码/requestId
+│   ├── health.py          # 媒体健康检查缓存
+│   └── routers/           # media / sources / tasks / storage / status
 ├── web/                   # Vue 3 前端（构建产物 web/dist，已忽略）
-├── fix_metadata.py         # 元数据修复脚本（message_time / message_id / source_link1 / source_username）
 ├── bot/                   # 机器人逻辑 (python-telegram-bot v21, async)
 │   ├── handlers.py        # 消息处理器
 │   ├── download.py        # 下载逻辑（含进度回调）
@@ -109,25 +119,25 @@ nano conf/config.toml
 3. 使用 Docker Compose 启动服务：
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 4. 查看日志：
 
 ```bash
-docker-compose logs -f
+docker compose logs -f
 ```
 
 5. 停止服务：
 
 ```bash
-docker-compose down
+docker compose down
 ```
 
 Docker 部署的优点：
 
 - 无需手动安装 Python 和依赖
-- 镜像内置 ffmpeg，支持视频封面生成与视频尺寸探测
+- 镜像内置 ffmpeg，支持视频封面生成
 - 环境隔离，不会影响系统环境
 - 自动重启服务
 - 数据持久化存储在宿主机的 downloads 目录
@@ -244,7 +254,7 @@ python main.py
 
 ## User API 下载范围与 20MB 限制
 
-User API（MTProto）使用的是 `TELEGRAM_API_ID/HASH` 对应账号的登录会话，因此它只能访问**该账号自己能看到的会话**，与媒体是谁发送的无关。
+User API（MTProto）使用的是 `conf/config.toml` 中 `api_id` / `api_hash` 对应账号的登录会话，因此它只能访问**该账号自己能看到的会话**，与媒体是谁发送的无关。
 
 | 场景 | User API 能否下载 |
 |------|-------------------|
@@ -264,7 +274,7 @@ User API（MTProto）使用的是 `TELEGRAM_API_ID/HASH` 对应账号的登录�
 
 典型表现是媒体组里图片（<20MB，走 Bot API）成功，而某个视频或大文件（走 User API）失败，并提示 `User API 下载失败`。日志里会出现目标消息 `Media: None`、在最近历史中找不到匹配媒体，这是因为 User API 读到的是它自己账号的会话，不是请求者与 bot 的私聊。
 
-如果需要支持“其他用户私聊中的大文件”，推荐部署 **本地 Bot API server**（`telegram-bot-api`），将下载上限从 20MB 提升到 **2GB**（使用 `conf/config.toml` 中已配置的 `TELEGRAM_API_ID/HASH`）：
+如果需要支持“其他用户私聊中的大文件”，推荐部署 **本地 Bot API server**（`telegram-bot-api`），将下载上限从 20MB 提升到 **2GB**（使用 `conf/config.toml` 中已配置的 `api_id` / `api_hash`）：
 
 ```python
 ApplicationBuilder()
@@ -317,7 +327,7 @@ TeleGrabber 现在自带一个功能强大的 Web 管理终端，随机器人同
 - **筛选增强**：消息流顶部漏斗按钮支持按媒体类型、日期范围、收藏、标签筛选，和搜索/来源筛选可叠加使用。
 - **大列表优化**：媒体分页改为 keyset 游标，消息流使用虚拟滚动，只渲染视口附近的气泡。
 - **运维能力**：`/healthz` 健康检查、磁盘不足横幅；审计日志开启后可直接查看 `data/audit_*.json`。
-- **本地访问**：根路径直接进入消息流，无登录页；默认仅监听 `127.0.0.1`。
+- **本地访问**：根路径进入欢迎页，消息流位于 `/feed`；无登录页，默认仅监听 `127.0.0.1`。
 
 ### 访问方式：
 
@@ -333,7 +343,7 @@ host = "127.0.0.1"  # 默认仅本机；确需局域网/容器访问时再改为
 port = 5005
 ```
 
-> **无内置鉴权说明**：去掉登录后，任何能访问该端口的人都可以查看、删除媒体，并读取审计日志。修改 `host = "0.0.0.0"` 前请确认网络环境可信。
+> **无内置鉴权说明**：去掉登录后，任何能访问该端口的人都可以查看、删除媒体。修改 `host = "0.0.0.0"` 前请确认网络环境可信。
 >
 > **任务中心配置**：
 > ```toml
@@ -383,7 +393,7 @@ data_dir = "data"
 [web]
 # 监听地址（默认仅本机）与端口
 host = "127.0.0.1"
-port = 5000
+port = 5005
 
 [audit]
 # 可选：审计日志开关（默认关闭）

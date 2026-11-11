@@ -1,0 +1,146 @@
+.welcome-page {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  overflow-y: auto;
+  background: var(--chat-bg-image);
+}
+
+.welcome-card {
+  width: min(720px, 100%);
+  padding: 36px;
+  border: 1px solid var(--divider);
+  border-radius: 18px;
+  background: var(--sidebar-bg);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+}
+
+.welcome-brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+
+  h1 {
+    margin: 0;
+    color: var(--text);
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+  }
+
+  p {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+}
+
+.welcome-logo {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.welcome-desc {
+  margin: 24px 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.welcome-features {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.welcome-feature {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 14px 16px;
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.welcome-feature-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.welcome-feature-desc {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+.welcome-enter {
+  padding: 10px 22px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--transition);
+
+  &:hover {
+    background: var(--accent-hover);
+  }
+}
+
+.welcome-link {
+  padding: 9px 14px;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-decoration: none;
+  transition: background var(--transition), color var(--transition);
+
+  &:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+}
+
+.welcome-hint {
+  margin: 20px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .welcome-page {
+    align-items: flex-start;
+    padding: 18px;
+  }
+
+  .welcome-card {
+    padding: 24px;
+  }
+
+  .welcome-features {
+    grid-template-columns: 1fr;
+  }
+}

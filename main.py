@@ -11,16 +11,16 @@ from telegram.ext import (
 )
 import telegram.error
 
-from config import (
+from core.config import (
     TOKEN, logger, get_connection_args, USER_API_ENABLED,
     WEB_HOST, WEB_PORT, TASK_RETAIN_DAYS,
 )
 import bot
-from utils import init_db
-from task_manager import fail_stale_tasks, prune_tasks
-import user_api
-import web_backend
-import runtime_state
+from core.utils import init_db
+from core.task_manager import fail_stale_tasks, prune_tasks
+from core import user_api
+from core import runtime_state
+from webapp.app import run_server
 
 
 def build_application():
@@ -161,7 +161,7 @@ def main() -> None:
 
     # 启动 Web 管理后台 (独立线程，自带 uvicorn 事件循环)
     logger.info(f"正在启动 Web 管理后台 (http://{WEB_HOST}:{WEB_PORT})...")
-    threading.Thread(target=web_backend.run_server, args=(WEB_HOST, WEB_PORT), daemon=True).start()
+    threading.Thread(target=run_server, args=(WEB_HOST, WEB_PORT), daemon=True).start()
 
     logger.info("启动机器人...")
     try:

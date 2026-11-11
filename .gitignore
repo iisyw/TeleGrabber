@@ -1,6 +1,9 @@
 # 本地实际配置（含敏感信息）
 conf/config.toml
 
+# 旧版根目录环境变量文件（已废弃）
+/.env
+
 # Python虚拟环境
 venv/
 env/
@@ -18,20 +21,13 @@ downloads/
 *.tmp
 .DS_Store
 
-# Pyrogram 会话文件 (包含敏感登录凭据，切勿上传)
+# 运行时数据（SQLite、session、审计日志、缩略图）
+data/
 *.session
 *.session-journal
-
-# SQLite 数据库
 *.db
 *.db-shm
 *.db-wal
-
-# 审计日志
-data/audit*.json
-
-# 缩略图（可重建的派生缓存）
-data/thumbs/
 
 # 前端依赖与构建产物
 web/node_modules/

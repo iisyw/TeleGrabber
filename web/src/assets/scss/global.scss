@@ -198,49 +198,6 @@
   transform: translateX(-50%);
 }
 
-.app-welcome {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 2500;
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  max-width: 360px;
-  padding: 14px 16px;
-  border: 1px solid var(--divider);
-  border-radius: 12px;
-  background: var(--sidebar-bg);
-  color: var(--text);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
-
-  button {
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 18px;
-    line-height: 1;
-    cursor: pointer;
-
-    &:hover {
-      color: var(--text);
-    }
-  }
-}
-
-.app-welcome-title {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.app-welcome-sub {
-  margin-top: 4px;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 /* 多个管理页共用的面板 */
 .storage-section {
   padding: 16px;

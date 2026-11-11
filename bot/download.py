@@ -11,15 +11,16 @@ import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import logger, USER_API_ENABLED, DOWNLOAD_TIMEOUT
-import task_manager
-from utils import (
+from core.config import logger, USER_API_ENABLED, DOWNLOAD_TIMEOUT
+from core import task_manager
+from core.media_files import (
     get_save_directory, generate_temp_filename, get_image_extension,
-    get_video_extension, save_to_db, get_duplicate_info, delete_media_records,
-    get_message_date, get_message_id, utc_to_local,
-    save_thumbnail_bytes, thumb_exists,
+    get_video_extension, get_archive_ext,
 )
-import user_api
+from core.telegram_meta import get_message_date, get_message_id, utc_to_local
+from core.thumbnails import save_thumbnail_bytes, thumb_exists
+from core.utils import save_to_db, get_duplicate_info, delete_media_records
+from core import user_api
 from bot import state
 
 # 大文件阈值：超过此大小走 User API (MTProto)，因为 Bot API 限制 20MB
@@ -89,7 +90,6 @@ def save_media_metadata(user, media_info, final_filename, save_dir, media_group_
         caption=media_info.get('caption'),
         source_name=media_info.get('source_name'), source_id=media_info.get('source_id'),
         source_link1=media_info.get('source_link1') or fallback_link1,
-        source_link2=media_info.get('source_link2'),
         source_username=media_info.get('source_username'),
         source_type=media_info.get('source_type'),
         message_time=message_time,
@@ -136,9 +136,7 @@ def build_single_record(media_obj, media_type, date_dir, source_info, ext_for_la
         'source_name': source_info['source_name'],
         'source_id': source_info['source_id'],
         'source_link1': source_info['source_link1'],
-        'source_link2': source_info['source_link2'],
-        'source_username': source_info['source_username'],
-        'source_type': source_info['source_type'],
+        'source_username': source_info['source_username'],        'source_type': source_info['source_type'],
         'orig_chat_id': source_info['orig_chat_id'],
         'orig_msg_id': source_info['orig_msg_id'],
         'chat_id': chat.id,
@@ -255,7 +253,6 @@ def build_retry_context(media_info, media_type, date_dir, source_info,
         'source_name': source_info.get('source_name'),
         'source_id': source_info.get('source_id'),
         'source_link1': source_info.get('source_link1'),
-        'source_link2': source_info.get('source_link2'),
         'source_username': source_info.get('source_username'),
         'source_type': source_info.get('source_type'),
         'orig_chat_id': source_info.get('orig_chat_id'),
@@ -423,7 +420,6 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
         media_type=media_type, caption=record.get('caption'),
         source_name=record.get('source_name'), source_id=record.get('source_id'),
         source_link1=record.get('source_link1'),
-        source_link2=record.get('source_link2'),
         source_username=record.get('source_username'),
         source_type=source_type,
         message_time=record.get('message_time'),
@@ -508,7 +504,6 @@ async def download_small_from_record(bot, record):
             media_type=media_type, caption=record.get('caption'),
             source_name=record.get('source_name'), source_id=record.get('source_id'),
             source_link1=record.get('source_link1'),
-            source_link2=record.get('source_link2'),
             source_username=record.get('source_username'),
             source_type=record.get('source_type'),
             message_time=record.get('message_time'),
@@ -638,8 +633,7 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
         update.effective_user, media_obj, final_filename,
         save_dir=date_dir, media_type=media_type, caption=update.message.caption,
         source_name=source_info['source_name'], source_id=source_info['source_id'],
-        source_link1=source_info['source_link1'], source_link2=source_info['source_link2'],
-        source_username=source_info['source_username'], source_type=source_info['source_type'],
+        source_link1=source_info['source_link1'], source_username=source_info['source_username'], source_type=source_info['source_type'],
         message_time=message_time,
         message_id=get_message_id(update.message),
         current_message_id=update.message.message_id,
@@ -718,8 +712,7 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
             update.effective_user, media_obj, final_filename,
             save_dir=date_dir, media_type=media_type, caption=update.message.caption,
             source_name=source_info['source_name'], source_id=source_info['source_id'],
-            source_link1=source_info['source_link1'], source_link2=source_info['source_link2'],
-            source_username=source_info['source_username'], source_type=source_info['source_type'],
+            source_link1=source_info['source_link1'], source_username=source_info['source_username'], source_type=source_info['source_type'],
             message_time=message_time,
             message_id=get_message_id(update.message),
             current_message_id=update.message.message_id,
@@ -747,25 +740,4 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
         return None
 
 
-def get_archive_ext(file_path):
-    """通过文件头检测压缩包/文档类型，返回扩展名。"""
-    try:
-        with open(file_path, 'rb') as f:
-            header = f.read(8)
-        if header[:2] == b'PK':
-            return '.zip'
-        if header[:4] == b'Rar!':
-            return '.rar'
-        if header[:6] == b'7z\xbc\xaf\x27\x1c':
-            return '.7z'
-        if header[:2] == b'\x1f\x8b':
-            return '.gz'
-        if header[:5] == b'\xfd7zXZ':
-            return '.xz'
-        if header[:4] == b'\x25\x50\x44\x46':
-            return '.pdf'
-        if header[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
-            return '.doc'  # OLE2 format (doc/xls/ppt)
-        return None
-    except Exception:
-        return None
+

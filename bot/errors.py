@@ -1,6 +1,6 @@
 """全局错误处理器：捕获 handler 中未处理的异常，记录日志并尽量通知用户。"""
 
-from config import logger
+from core.config import logger
 
 
 async def error_handler(update, context) -> None:

@@ -36,7 +36,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "web": {
         "host": "127.0.0.1",
-        "port": 5000,
+        "port": 5005,
     },
     "tasks": {
         "retain_days": 30,

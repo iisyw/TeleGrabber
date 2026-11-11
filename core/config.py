@@ -4,7 +4,7 @@
 import os
 import logging
 
-from config_loader import ConfigError, load_config
+from .config_loader import ConfigError, load_config
 
 # 配置日志
 logging.basicConfig(
@@ -38,7 +38,7 @@ logging.getLogger('pyrogram').setLevel(logging.WARNING)
 # 压制 httpx 轮询日志（getUpdates 每 1-2 秒一条，太吵）
 logging.getLogger('httpx').setLevel(logging.WARNING)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.environ.get(
     "TELEGRABBER_CONFIG", os.path.join(BASE_DIR, "conf", "config.toml")
 )

@@ -1,94 +1,232 @@
-# AGENTS.md - AI 智能体开发与协作规范
+# AGENTS.md - TeleGrabber 开发与协作规范
 
-本文档为 AI Agent 在本工程内执行任何代码分析、文件编辑、重构与终端操作时必须严格遵循的全局准则。在执行任何任务前，优先以本文档规定的原则为准。
-
----
-
-## 🚫 1. 杜绝旧逻辑兼容包袱（Zero-Legacy Policy）
-
-- **坚决不保留向后兼容逻辑**：在重构、迭代或修改代码时，直接采用最新的标准设计与最优解，**严禁添加任何针对旧版本、旧数据结构、旧缓存字段或过时参数的兼容回退代码**（例如：旧字段回退判断、旧 `localStorage` key 兼容读取、过时的兼容别名等）。
-- **彻底清理废弃代码**：一旦某个模块、字段、配置或 API 被新方案取代，必须将旧逻辑与旧实现彻底删除，保持代码库的绝对纯粹与精简，绝不遗留任何技术债务。
+本文档是 AI Agent 在本工程内执行分析、修改、重构、评审和终端操作时必须遵循的准则。执行任务前，优先以本文档为准。
 
 ---
 
-## 📦 2. 静态产物与 Git 提交边界
+## 1. 项目定位与运行边界
 
-- **构建产物严禁进入 Git 仓库**：
-  - 前端生产打包输出至 `web/dist/`，本地单体联调时可拷贝至后端 `public/` 目录。
-  - `public/` 目录下由前端构建产生的所有文件（包括 `public/index.html`、`public/assets/` 等）已被 `.gitignore` 规则（`public/*`）全面忽略，**严禁以任何形式将构建产物添加到 Git 暂存区或提交到版本历史中**。
-  - Git 中仅保留 `public/.gitkeep` 占位文件，以确保代码仓库克隆时静态目录结构完整。
-
----
-
-## 🏗️ 3. 架构与工程规范
-
-- **统一响应与错误处理**：后端对外接口统一使用 `internal/platform/gwe` 构建 JSON 响应与业务错误码，保持请求链路追踪（`requestId`）规范一致。
-- **数据库基线与迁移同步**：新增或修改数据表时，全量初始化脚本（`deploy/init.sql`）与增量迁移脚本（`migrations/`）必须严格同步对齐。
-- **角色与权限层级**：严格遵循 `sys_role` 的 0/1/2 阶梯层级鉴权模型（0: 超管, 1: 高管, 2: 普管），JWT Claims 中注入层级标识，前后端严密防范越权操作。
-- **凭据与敏感信息安全**：前端敏感凭据（如记住账号密码）必须遵循 AES 密文存储，UI 保持企业级极简风格（对齐 `emw`）。
+- TeleGrabber 是**个人自用的 Telegram 媒体归档工具**，不是多租户 SaaS。
+- 技术栈：
+  - 后端：Python 3 + python-telegram-bot v21 + Pyrogram（User API）+ FastAPI + SQLite
+  - 前端：Vue 3 + Vite + Pinia + Element Plus + SCSS
+- 默认部署方式：
+  - Web 后台只监听 `127.0.0.1`，不内置登录鉴权
+  - 如需局域网/远程访问，由 VPN、SSH 隧道或反向代理负责访问控制
+- 不实现浏览器下载功能：
+  - 媒体由 Bot/User API 下载到项目机器的 `downloads/`
+  - Web 只负责浏览、预览、检索、删除、标签/收藏/备注
+  - 文件需要时直接从文件系统取用
 
 ---
 
-## 🛡️ 4. 真实数据与精准必要兜底规范（Truthful & Minimal Fallbacks Policy）
+## 2. 杜绝旧逻辑兼容包袱（Zero-Legacy Policy）
 
-- **核心原则：非必要不兜底，真实反映数据现状**：
-  - 只有在防范程序崩溃或明确需要空值占位等必要场景下才允许做防御兜底，严禁毫无节制地滥加默认值。
-- **严禁捏造与臆测假数据（No Arbitrary / Hallucinated Fallbacks）**：
-  - 严禁在视图层、状态管理或业务逻辑中硬编码捏造业务默认值（例如：`deployType || '本地开发环境'`、`roleName || '超级管理员'`）。
-  - 如果数据尚未加载完成、未配置或字段为空，必须真实客观反映（如统一显示中立占位符 `'-'`、未配置或留空），绝不可捏造虚假信息欺骗用户或掩盖线上故障与配置失效。
-- **严禁表单回填脑补污染真实数据（No Silent Mutation）**：
-  - 在弹窗编辑表单初始化时，严禁给缺失数值赋值臆造的默认数据（例如：`editForm.age = row.age || 25`、`editForm.roleId = row.roleId || 3`）。
-  - 数据回填必须原样保持真实状态（如 `row.age ?? null`、`row.roleId || row.role?.roleId`），严禁用户在不知情或仅修改其他字段时将臆测数据持久化写入数据库。
-- **合法的必要兜底场景（Legitimate Fallback Scenarios）**：
-  1. **容器防崩溃（Crash Prevention）**：在数据列表未返回时兜底为空数组（如 `const list = res.data?.list || []`），防止调用 `.map()` 或 `.forEach()` 发生空指针运行时崩溃。
-  2. **中立客观占位符（Neutral Placeholders）**：表格或详情字段未填写时，统一采用 `'-'` 明确告知用户该项无数据（如 `row.phone || '-'`、`row.email || '-'`）。
-  3. **标准路由跳转缺省（Route Defaults）**：在重定向参数不存在时提供基准路由（如 `const redirect = route.query.redirect || '/home'`）。
-- **杜绝语法级滥用**：严禁在 `switch/case` 等逻辑判断中将 `||` 误用为分支条件（例如 `case "A" || "B"` 导致分支永远失效），多分支必须严格遵守语言规范的标准语法。
+- 重构时直接采用当前最优设计，严禁保留旧字段、旧参数、旧配置、旧缓存、旧 API 的兼容分支。
+- 已废弃的模块、字段、接口、配置和前端代码必须**彻底删除**，不保留别名、不保留“兼容读取”、不保留“旧数据回退”。
+- 典型禁止项：
+  - 旧 `.env` 配置读取、旧 Basic Auth/Session 登录回退
+  - 旧 `static/` 页面路径、旧单一 `telegram.css`
+  - 已删除的 `source_link2`、旧媒体组 `single` 标记
+  - 旧 `public/` 构建产物、旧数据目录布局
+- 数据库只保留当前 schema 基线。除用户明确要求外，不在 `init_db()` 中堆叠历史列迁移、旧任务清理或旧字段回填逻辑。
+- 需要修复历史数据时，使用一次性维护脚本处理完后删除，不要把修复逻辑塞进正常启动流程，也不要长期保留维护脚本。
 
 ---
 
-## 📢 5. 请求错误处理与单次弹窗规范（Single-Toast Error Policy）
+## 3. 代码结构与职责
 
-- **单一真相源原则（Single Source of Truth）**：
-  - 全局网络请求拦截器（[`request.js`](file:///home/syw/work/My/DefaultFramework/web/src/utils/request.js)）是系统所有网络异常与业务错误（`code !== 10000`）的**唯一法定弹窗出口**，统一调用 `ElMessage.error` 且启用 `grouping: true` 去重合并。
-- **严禁业务组件二次弹窗（No Duplicate Error Toasts）**：
-  - 视图组件中的 `try...catch` 仅用于业务流程控制与组件状态复位（例如 `loading.value = false`、`submitting.value = false`、开关状态回滚等）。
-  - **严禁在组件的 `catch` 块中再次调用 `ElMessage.error`**，彻底杜绝一次接口失败触发两次重叠弹窗的劣质体验。
-- **特殊自定义场景显式声明**：
-  - 若特定业务调用确实需要静默处理或完全自定义错误 UI，必须在请求配置中显式传递 `{ skipErrorToast: true }` 或 `{ silent: true }`，方可由业务组件接管错误呈现。
+```text
+main.py              # 启动入口：配置、DB、Bot、Web、User API
+core/                # 核心业务模块
+core/config.py       # 读取 conf/config.toml 并导出配置常量
+core/config_loader.py # TOML 解析、默认值、类型与范围校验
+core/utils.py        # SQLite schema、媒体落库、删除、FTS
+core/media_files.py  # 保存目录、文件名与扩展名
+core/telegram_meta.py # 消息时间/ID、私有频道链接
+core/thumbnails.py   # 缩略图生成、缓存与清理
+core/audit.py        # 审计日志
+core/task_manager.py # 下载任务持久化、进度、取消、批次
+core/retry_service.py # 任务重试队列、优先级、Bot/User API 回退
+core/runtime_state.py # Bot 运行状态与最近错误
+core/user_api.py     # Pyrogram 同步封装、转发、链接解析、下载
+bot/                 # 消息处理、媒体组、下载、按钮回调、按钮状态
+webapp/app.py        # FastAPI 组装：中间件、异常、静态资源、SPA 回退
+webapp/api_response.py # 统一响应/错误码/requestId
+webapp/health.py     # 媒体文件健康检查与缓存
+webapp/routers/      # media / sources / tasks / storage / status 路由
+web/                 # Vue 3 前端；组件与视图同目录同名 .scss
+downloads/           # 原始媒体（不入库）
+data/                # SQLite、缩略图、审计日志、session
+```
+
+- 不要新增职责不清的“万能模块”；公共逻辑放入已有模块或独立单一职责模块。
+- 前端组件样式使用同目录同名 `.scss`，通过 `<style scoped lang="scss" src="./X.scss">` 引入。
+- 全局样式只放 reset、主题变量、通用按钮/徽标/管理页骨架；不要再恢复单一全局 CSS。
 
 ---
 
-## 🔒 6. Git 协作与用户独立暂存权边界（Git Operation Boundary）
+## 4. 数据库与数据契约
 
-- **AI 严禁操作暂存区与提交历史**：
-  - AI 智能体在修复、重构或生成代码时，**严禁执行任何 `git add`（暂存）、`git commit`（提交）或 `git restore --staged`（撤销暂存）操作**。
-  - 所有由 AI 修改或新增的代码必须完整保留在本地工作区（Unstaged），保留 Git 的最原始变更状态。
-- **用户对代码具有绝对审核与暂存决定权**：
-  - 用户在本地通过 `git diff` 逐行审查 AI 的改动，由用户决定哪些文件暂存、何时提交以及提交信息内容。
-  - 即使任务完成或用户要求测试，AI 也仅可在本地执行验证指令（如 `go test`、`npm run build`），绝对不可擅自将文件添加到暂存区。
+- SQLite 是唯一数据库，数据库文件为 `data/telegrabber.db`，开启 WAL。
+- `utils.init_db()` 是**唯一 schema 基线来源**：
+  - 修改表结构时，直接更新 `CREATE TABLE` 与 `utils._schema_docs`
+  - 不添加旧列迁移、旧值回填、旧表删除逻辑，除非用户明确要求升级旧库
+  - 新装用户从空库启动即可
+- 所有数据库写入必须通过 `utils._db_lock` 或 `task_manager._lock` 串行化，避免 `database is locked`。
+- `media_metadata` 是媒体唯一索引：
+  - `file_unique_id` 唯一，用于去重
+  - 原始媒体只存一份；缩略图是派生文件，不写入媒体记录
+  - 来源链接只保留 `source_link1`；公开频道用用户名链接，私有频道用 `t.me/c` 链接
+- `download_tasks`：
+  - 每次媒体组下载/重下生成独立 `batch_id`
+  - 任务中心按 `batch_id` 分组，不能只按 `media_group_id` 合并
+  - 成功任务必须补齐 `downloaded_bytes`，不能长期显示 `0B / 总大小`
+- 旧字段、旧状态值、旧兼容标记不得重新引入。
 
 ---
 
-## 🔢 7. 表单数值与数据库零值契约规范（Form Zero-Value Contract）
+## 5. 配置边界
 
-- **前端表单回填保持客观真实（No False Zeroes）**：
-  - 数字类型字段（如 `age`、`sort` 等）在无数据或未填写时，表单对象中统一显式初始化为 `null`（例如 `createForm.age = null`；编辑表单回填 `editForm.age = (row.age && row.age > 0) ? row.age : null`）。
-  - 严禁在界面上默认将缺失值脑补展示为 `0` 或虚假数值（例如避免界面输入框显示荒谬的“0 岁”），确保输入框能正确显示占位提示文字（`placeholder`）。
-- **提交后端时精准映射零值契约（Nullish Coalescing）**：
-  - 表单向后端提交时，如该字段在数据库中属于非空整型（`int NOT NULL DEFAULT 0`），统一采用 ES2020 空值合并操作符将其安全归整为后端零值（例如 `age: form.age ?? 0`），杜绝因向后端传递 `null` 导致的解析异常或前后端契约断裂。
+- 后端配置：`conf/config.toml`
+  - `conf/config.example.toml` 必须与代码字段完全同步
+  - `conf/config.toml` 含敏感信息，已被 `.gitignore` 忽略
+  - 不再使用 `.env`、`python-dotenv`
+- 前端配置：`web/.env*`（Vite 专用）
+  - Vite 只读取 `VITE_*`
+  - 后端端口由 `[web].port` 决定，需同步更新 `web/.env.development` 的代理目标
+  - 前端不得读取后端 `config.toml`
+- `save_dir` 推荐使用绝对路径；相对路径依赖进程工作目录，容易造成媒体 404。
 
 ---
 
-## 🔍 8. 端到端全链路全量审计规范（Exhaustive Cross-Layer Audit Policy）
+## 6. API 与错误处理
 
-- **杜绝局部修补思维（No Patch-Fixing Mindset）**：
-  - 代码审查或缺陷修复时，严禁仅针对受影响的代码行做单点修补，必须以“端到端全链路”视角覆盖 **前端视图组件 -> API 请求层 -> 后端路由中间件 -> Service 业务逻辑 -> 数据库与模型契约** 五大层次。
-- **全量闭环审计矩阵**：
-  - 每次代码交付前，必须执行全维度编译与静态检查验证矩阵：
-    1. **Go 静态分析**：`go vet ./...` 0 报错、0 警告；
-    2. **Go 竞态检测**：`go test -race ./...` 保证无数据竞争（Data Race）；
-    3. **Go 全包测试**：`go test -count=1 ./...` 全通过；
-    4. **前端生产构建**：`npm run build` 0 报错、0 警告；
-    5. **规范符合性**：0 违规 `ElMessage.error`、0 捏造默认值、0 破坏 Git 暂存边界。
+- 所有 `/api/*` 响应统一使用 `webapp/api_response.py`：
+  - 成功：`{ code: 10000, msg, data, requestId }`
+  - 业务错误：HTTP 200 + `code != 10000`
+  - 资源不存在：`40004`
+  - 参数错误：`40006`
+  - 禁止访问：`40008`
+  - 系统错误：`50000`
+- 前端网络层唯一入口：`web/src/utils/request.js`
+  - 自动解包 envelope
+  - 统一 `ElMessage.error({ grouping: true })`
+  - 业务组件 `catch` 只做流程复位，禁止再次弹错误
+  - 需要静默处理时显式传 `{ silent: true }` 或 `{ skipErrorToast: true }`
+- 媒体 URL 规则必须前后端一致：
+  - `unsorted/<filename>`
+  - `direct_messages/<source_name>/<filename>`
+  - `<source_name>/<filename>`
+- 不要把下载、重试、删除等写操作做成 GET。
 
+---
+
+## 7. 前端规范
+
+- Vue 3 `<script setup>`，组合式 API；不要引入 Vuex 或旧版写法。
+- 路由：欢迎页 `/`、消息流 `/feed`、下载任务 `/tasks`、存储管理 `/storage`、系统状态 `/status`。
+- 媒体列表：
+  - 分页使用 keyset（`cursor_time` + `cursor_id`），不要恢复 offset 分页
+  - 消息流使用虚拟滚动，不要一次渲染全部记录
+- 媒体预览：
+  - 图片/视频通过 `/media/...` 访问
+  - 视频封面优先 Telegram 缩略图，缺失时用 ffmpeg 抽帧
+  - 不提供浏览器下载按钮
+- Element Plus 按需引入，不恢复全局全量 CSS/插件。
+- 复制/参考 DefaultFramework 时，只借鉴结构（request.js、scss 组织、响应规范），不要把 Go/GWE/JWT/角色体系带进来。
+
+---
+
+## 8. 真实数据与必要兜底
+
+- 不允许捏造业务数据：
+  - 缺失字段显示 `'-'`
+  - 未配置显示“未配置”，不要编造默认环境名、默认角色、默认密码等
+- 允许的兜底仅限：
+  - 数据未加载时列表为空数组，防止 `.map()` 崩溃
+  - 中立占位符 `'-'`
+  - 路由缺省跳转
+- 表单回填必须保持真实值，不得把缺失数字脑补成 0；提交时按后端非空字段契约用 `?? 0` 归整。
+
+---
+
+## 9. 安全、凭据与部署
+
+- 当前没有内置登录鉴权，这是明确的产品选择：
+  - 不要重新添加 Basic Auth、Session Cookie、CSRF、登录页
+  - 默认 `[web].host = "127.0.0.1"`
+  - 修改为 `0.0.0.0` 前必须提醒用户网络暴露风险
+- Bot Token、User API API_ID/API_HASH、代理凭据只放 `conf/config.toml`，不得写入代码或日志。
+- Docker：
+  - 镜像内构建前端，安装 ffmpeg
+  - 只挂载 `conf/config.toml`、`downloads/`、`data/`
+  - 不再挂载旧 `static/`
+- 反向代理必须同时转发 `/api/`、`/media/`、`/thumb/`。
+
+---
+
+## 10. 静态产物与 Git 边界
+
+- 构建产物严禁进入 Git：
+  - `web/dist/`
+  - `web/node_modules/`
+  - `conf/config.toml`
+  - `downloads/`
+  - `data/`（含 SQLite、session、审计日志、缩略图）
+- AI 严禁执行 `git add`、`git commit`、`git restore --staged`。
+- 所有修改保留在工作区，由用户自行审查、暂存、提交。
+- 验证只允许本地执行编译、测试、构建，不得擅自提交。
+
+---
+
+## 11. 并发与线程模型
+
+- Bot 主事件循环与 Web/uvicorn 线程是分离的：
+  - 不要在 Web 线程直接调用 asyncio 对象
+  - User API 的同步封装通过 `run_coroutine_threadsafe` 调度
+  - Bot API 下载在需要时通过独立 Bot 实例或主事件循环执行
+- 下载重试队列：
+  - `retry_service` 使用独立 worker 线程与优先级队列
+  - 暂停只对重试队列中尚未开始的任务生效
+  - 下载中取消只能在当前下载步骤结束后生效
+- 缩略图生成使用独立线程池与信号量，避免阻塞下载主流程。
+
+---
+
+## 12. 端到端验证矩阵
+
+每次代码交付前至少执行：
+
+1. Python 编译：
+   ```bash
+   python3 -m py_compile main.py core/*.py webapp/app.py webapp/api_response.py webapp/health.py webapp/routers/*.py bot/*.py
+   ```
+2. 后端测试：
+   ```bash
+   venv/bin/python -m unittest discover -s tests -q
+   ```
+3. 前端构建：
+   ```bash
+   cd web && npm run build
+   ```
+4. 接口烟雾测试：
+   - `/healthz`
+   - `/api/media`
+   - `/api/sources`
+   - `/api/tasks`
+   - `/api/status`
+5. 规范符合性：
+   - 0 处业务组件重复错误弹窗
+   - 0 处捏造默认值
+   - 0 处旧字段/旧配置兼容分支
+   - 0 破坏 Git 暂存边界
+
+---
+
+## 13. 审查原则
+
+- 修复缺陷必须覆盖：前端 → API 请求层 → 后端路由 → Service/下载逻辑 → SQLite/文件系统。
+- 不要只改一行让现象消失；要确认真实数据、路径、线程和状态转换都正确。
+- 不为了“以后可能用”增加抽象、配置项或回退分支。
+- 发现旧逻辑时优先删除，而不是再加一层兼容包装。

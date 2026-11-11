@@ -1,0 +1,18 @@
+@use './task-shared' as *;
+
+.task-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.task-card--group {
+  border-color: var(--accent);
+}
+
+.task-group-items {
+  padding: 4px 14px 8px;
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  background: var(--bg);
+}

@@ -3,8 +3,8 @@
 import time
 import functools
 
-from config import logger, ALLOWED_USERS, ENABLE_USER_RESTRICTION, GITHUB_REPO
-from utils import build_private_message_link
+from core.config import logger, ALLOWED_USERS, ENABLE_USER_RESTRICTION, GITHUB_REPO
+from core.telegram_meta import build_private_message_link
 from bot import state
 
 
@@ -63,7 +63,7 @@ def get_forward_source_info(message):
       - MessageOriginHiddenUser (.sender_user_name)
 
     Returns:
-        dict: {source_name, source_username, source_id, source_link1, source_link2,
+        dict: {source_name, source_username, source_id, source_link1,
                source_type, orig_chat_id, orig_msg_id}
     """
     import re
@@ -73,7 +73,6 @@ def get_forward_source_info(message):
         'source_username': None,
         'source_id': None,
         'source_link1': None,
-        'source_link2': None,
         'source_type': "unknown",
         'orig_chat_id': None,
         'orig_msg_id': None,
@@ -92,10 +91,8 @@ def get_forward_source_info(message):
         if chat.username:
             info['source_username'] = chat.username
             info['source_link1'] = f"https://t.me/{chat.username}/{info['orig_msg_id']}"
-            info['source_link2'] = ''
         else:
             info['source_link1'] = build_private_message_link(chat.id, info['orig_msg_id'])
-            info['source_link2'] = ''
 
     elif origin_type == "chat":
         chat = origin.sender_chat
@@ -106,10 +103,8 @@ def get_forward_source_info(message):
         if chat.username:
             info['source_username'] = chat.username
             info['source_link1'] = f"https://t.me/{chat.username}"
-            info['source_link2'] = ''
         else:
             info['source_link1'] = build_private_message_link(chat.id)
-            info['source_link2'] = ''
 
     elif origin_type == "user":
         user_from = origin.sender_user
@@ -125,13 +120,11 @@ def get_forward_source_info(message):
         if user_from.username:
             info['source_username'] = user_from.username
             info['source_link1'] = f"https://t.me/{user_from.username}"
-            info['source_link2'] = ''
 
     elif origin_type == "hidden_user":
         info['source_name'] = getattr(origin, 'sender_user_name', None) or "hidden_user"
         info['source_id'] = "unknown"
         info['source_link1'] = ''
-        info['source_link2'] = ''
         info['source_type'] = "private_user"
 
     if info['source_name']:

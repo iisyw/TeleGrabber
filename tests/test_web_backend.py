@@ -1,46 +1,18 @@
 import importlib.util
-import logging
 import os
-import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import utils
+from core import utils
 
 FASTAPI_AVAILABLE = importlib.util.find_spec("fastapi") is not None
 if FASTAPI_AVAILABLE:
-    config_stub = sys.modules.get("config")
-    if config_stub is None:
-        config_stub = SimpleNamespace()
-        sys.modules["config"] = config_stub
-    for key, value in {
-        "SAVE_DIR": "downloads",
-        "DATA_DIR": "data",
-        "AUDIT_LOG": False,
-        "TOKEN": "token",
-        "API_ID": 0,
-        "API_HASH": "",
-        "DOWNLOAD_RETRIES": 3,
-        "DOWNLOAD_TIMEOUT": 3600,
-        "DOWNLOAD_STALL_TIMEOUT": 180,
-        "USER_API_ENABLED": False,
-        "WEB_HOST": "127.0.0.1",
-        "WEB_PORT": 5000,
-        "ALLOWED_USERS": [],
-        "PROXY": "",
-        "TASK_RETAIN_DAYS": 30,
-        "TASK_RETRY_CONCURRENCY": 2,
-        "TASK_MIN_FREE_MB": 512,
-        "mask_proxy_url": lambda val: val,
-        "logger": logging.getLogger("test"),
-    }.items():
-        if not hasattr(config_stub, key):
-            setattr(config_stub, key, value)
-    import web_backend
+    from webapp.app import app as webapp_app  # noqa: F401  (确保 app 可正常组装)
+    from webapp.routers import sources as sources_api
 else:
-    web_backend = None
+    sources_api = None
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed")
@@ -75,7 +47,7 @@ class WebBackendTestCase(unittest.TestCase):
         self._save("b", "channel-a", "channel", "album-1")
         self._save("c", "channel-b", "channel")
 
-        payload = web_backend.get_sources("channel")
+        payload = sources_api.get_sources("channel")
 
         self.assertEqual(payload["code"], 10000)
         data = payload["data"]
@@ -86,7 +58,7 @@ class WebBackendTestCase(unittest.TestCase):
         self.assertEqual(data["totals"], {"media_count": 3, "message_count": 2})
 
     def test_api_response_envelope(self):
-        from api_response import RESOURCE_NOT_FOUND, error_payload, ok, set_request_id
+        from webapp.api_response import RESOURCE_NOT_FOUND, error_payload, ok, set_request_id
 
         set_request_id("rid-123")
         self.assertEqual(

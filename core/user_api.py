@@ -2,17 +2,15 @@
 # -*- coding: utf-8 -*-
 
 from pyrogram import Client, utils
-from pyrogram.errors import ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden, FloodWait
-try:
-    from pyrogram.errors import ChatForwardsRestricted
-except ImportError:  # 兼容旧版 pyrogram 未导出该异常
-    ChatForwardsRestricted = None
-from config import (
+from pyrogram.errors import (
+    ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid,
+    ChatWriteForbidden, FloodWait, ChatForwardsRestricted,
+)
+from .config import (
     API_ID, API_HASH, PROXY, logger, SAVE_DIR, DOWNLOAD_RETRIES, DATA_DIR,
     DOWNLOAD_TIMEOUT, DOWNLOAD_STALL_TIMEOUT, TASK_MIN_FREE_MB,
     USER_API_ENABLED,
 )
-from utils import build_private_message_link
 import os
 import asyncio
 import time
@@ -276,10 +274,6 @@ def _message_media_info(message):
     source_link1 = getattr(message, 'link', None)
     if not source_link1 and source_username:
         source_link1 = f"https://t.me/{source_username}/{message.id}"
-    if getattr(chat, 'id', None):
-        source_link2 = build_private_message_link(chat.id, message.id)
-    else:
-        source_link2 = ''
 
     # 若 document 实际是视频源文件，归类为 video 以便 Web 端正确展示，
     # 但仍下载原始 document 对象（is_source_file 标记真实大小来源）。
@@ -310,7 +304,6 @@ def _message_media_info(message):
         'source_username': source_username,
         'source_id': str(getattr(chat, 'id', '')),
         'source_link1': source_link1,
-        'source_link2': source_link2,
         'source_type': _enum_value(getattr(chat, 'type', None)),
         'media_group_id': str(getattr(message, 'media_group_id', '') or ''),
         'message_id': message.id,
@@ -367,7 +360,7 @@ def _is_permanent_download_error(exc):
     """权限、消息丢失、文件过大等重试也不会成功的错误。"""
     if isinstance(exc, (ChannelInvalid, ChannelPrivate, MsgIdInvalid, PeerIdInvalid, ChatWriteForbidden)):
         return True
-    if ChatForwardsRestricted is not None and isinstance(exc, ChatForwardsRestricted):
+    if isinstance(exc, ChatForwardsRestricted):
         return True
     err = str(exc).upper()
     markers = (
@@ -686,7 +679,7 @@ def run_download_message_media(chat_id, message_id, final_path, progress_callbac
 
 def _is_forwards_restricted(exc):
     """判断异常是否为“来源禁止转发”类错误。"""
-    if ChatForwardsRestricted is not None and isinstance(exc, ChatForwardsRestricted):
+    if isinstance(exc, ChatForwardsRestricted):
         return True
     return "CHAT_FORWARDS_RESTRICTED" in str(exc).upper()
 

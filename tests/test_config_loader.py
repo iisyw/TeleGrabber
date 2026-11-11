@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from config_loader import ConfigError, load_config
+from core.config_loader import ConfigError, load_config
 
 
 class ConfigLoaderTestCase(unittest.TestCase):
@@ -19,7 +19,7 @@ class ConfigLoaderTestCase(unittest.TestCase):
 
     def test_defaults_when_file_missing(self):
         cfg = load_config(self.path)
-        self.assertEqual(cfg["web"]["port"], 5000)
+        self.assertEqual(cfg["web"]["port"], 5005)
         self.assertEqual(cfg["telegram"]["download_retries"], 3)
         self.assertFalse(cfg["audit"]["enabled"])
 

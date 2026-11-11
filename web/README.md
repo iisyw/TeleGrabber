@@ -40,9 +40,10 @@ src/
 ├── assets/scss/    # 全局 SCSS：reset / theme / global / media
 ├── components/     # 来源侧栏、顶栏、相册网格、气泡、媒体查看器等（样式与组件同名 .scss）
 ├── lib/            # 相册布局算法与媒体/日期工具函数
-├── router/         # 单页路由（/ 消息流，/tasks 任务，/storage 存储，/status 状态）
+├── router/         # 单页路由（/ 欢迎页，/feed 消息流，/tasks 任务，/storage 存储，/status 状态）
 ├── store/          # Pinia 媒体列表状态与分页
 ├── utils/          # request.js 统一网络层（对齐 DefaultFramework）
+├── views/welcome/  # 欢迎页（index.scss）
 ├── views/feed/     # 消息流主页面（index.scss）
 ├── views/tasks/    # 下载任务中心（index.scss）
 ├── views/storage/  # 存储统计与重复项（index.scss）

@@ -4,8 +4,8 @@ import json
 import threading
 from datetime import datetime, timedelta
 
-from config import logger
-import utils
+from .config import logger
+from . import utils
 
 _lock = utils._db_lock
 _TABLE_READY = False
@@ -21,7 +21,7 @@ def _ensure_table():
     global _TABLE_READY
     if _TABLE_READY:
         return
-    # init_db 会建表；这里兜底处理 web_backend 单独启动的情况
+    # init_db 会建表；这里兜底处理 Web 侧单独启动任务中心的情况
     try:
         conn = utils.get_db_connection()
         try:

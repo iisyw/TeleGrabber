@@ -8,7 +8,7 @@ import threading
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
-from config import SAVE_DIR
+from core.config import SAVE_DIR
 
 # 媒体组状态文件
 MEDIA_GROUP_STATE_FILE = os.path.join(SAVE_DIR, "media_groups_state.json")

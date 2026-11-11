@@ -16,13 +16,17 @@ import threading
 from telegram import Bot
 from telegram.request import HTTPXRequest
 
-from config import (
+from .config import (
     logger, SAVE_DIR, USER_API_ENABLED, TASK_RETRY_CONCURRENCY, TASK_MIN_FREE_MB,
     TOKEN, DOWNLOAD_TIMEOUT, PROXY,
 )
-import task_manager
-import user_api
-import utils
+from .media_files import (
+    generate_temp_filename, get_video_extension, get_image_extension,
+    get_archive_ext,
+)
+from . import task_manager
+from . import user_api
+from . import utils
 
 
 LARGE_FILE_THRESHOLD = 20 * 1024 * 1024
@@ -186,7 +190,7 @@ def _download(task, context):
 
     date_dir = context.get("date_dir") or SAVE_DIR
     os.makedirs(date_dir, exist_ok=True)
-    temp_filename = f".retry_{task_id}_{utils.generate_temp_filename()}"
+    temp_filename = f".retry_{task_id}_{generate_temp_filename()}"
     temp_path = os.path.join(date_dir, temp_filename)
 
     def progress(current, total):
@@ -274,7 +278,6 @@ def _download(task, context):
         source_name=context.get("source_name"),
         source_id=context.get("source_id"),
         source_link1=context.get("source_link1"),
-        source_link2=context.get("source_link2"),
         source_username=context.get("source_username"),
         source_type=context.get("source_type"),
         message_time=context.get("message_time"),
@@ -324,20 +327,20 @@ def _build_final_filename(context, ext):
     group_id = context.get("media_group_id") or ""
     index = context.get("item_index")
     if group_id and index is not None:
-        base = context.get("base_timestamp") or utils.generate_temp_filename(group_id)
+        base = context.get("base_timestamp") or generate_temp_filename(group_id)
         return f"{group_id}_{index}_{base}{ext}"
-    return f"{utils.generate_temp_filename()}{ext}"
+    return f"{generate_temp_filename()}{ext}"
 
 
 def _detect_ext(path, context):
     media_type = context.get("media_type")
     if media_type == "video":
-        return utils.get_video_extension(path)
+        return get_video_extension(path)
     if media_type == "photo":
-        return utils.get_image_extension(path)
+        return get_image_extension(path)
     if media_type == "animation":
-        return utils.get_video_extension(path)
-    ext = utils.get_archive_ext(path)
+        return get_video_extension(path)
+    ext = get_archive_ext(path)
     if ext:
         return ext
     original = context.get("filename") or ""

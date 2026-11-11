@@ -3,7 +3,7 @@
 对齐 DefaultFramework 的 internal/platform/gwe 约定：
 - 成功：{"code": 10000, "msg": "成功", "data": ..., "requestId": "..."}
 - 业务/系统错误：HTTP 200 + 非 10000 的 code
-- 未登录：HTTP 401 + code 40100
+- 未授权：HTTP 401 + code 40100（当前无内置鉴权，仅保留通用映射）
 """
 
 import contextvars

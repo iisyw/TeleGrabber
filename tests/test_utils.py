@@ -1,23 +1,11 @@
-import logging
 import os
 import sqlite3
-import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.modules.setdefault(
-    "config",
-    SimpleNamespace(
-        SAVE_DIR="downloads",
-        DATA_DIR="data",
-        AUDIT_LOG=False,
-        logger=logging.getLogger("test"),
-    ),
-)
-
-import utils
+from core import telegram_meta, utils
 
 
 class UtilsTestCase(unittest.TestCase):
@@ -34,11 +22,11 @@ class UtilsTestCase(unittest.TestCase):
 
     def test_private_message_link_normalizes_channel_id(self):
         self.assertEqual(
-            utils.build_private_message_link(-1001812716119, 12345),
+            telegram_meta.build_private_message_link(-1001812716119, 12345),
             "https://t.me/c/1812716119/12345",
         )
         self.assertEqual(
-            utils.build_private_message_link("1812716119"),
+            telegram_meta.build_private_message_link("1812716119"),
             "https://t.me/c/1812716119",
         )
 

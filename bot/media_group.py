@@ -16,14 +16,16 @@ from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import logger, USER_API_ENABLED
-from utils import (
+from core.config import logger, USER_API_ENABLED
+from core.media_files import (
     get_save_directory, generate_temp_filename, get_image_extension,
-    get_video_extension, save_to_db, get_duplicate_info, delete_media_records,
-    append_audit, get_message_date, get_message_id, utc_to_local,
+    get_video_extension,
 )
-import user_api
-import task_manager
+from core.telegram_meta import get_message_date, get_message_id, utc_to_local
+from core.audit import append_audit
+from core.utils import save_to_db, get_duplicate_info, delete_media_records
+from core import user_api
+from core import task_manager
 from bot import state
 from bot.helpers import get_forward_source_info
 from bot.download import (
@@ -106,7 +108,6 @@ def save_media_groups_collection(collection=None):
                     'source_username': value.get('source_username'),
                     'source_id': value.get('source_id'),
                     'source_link1': value.get('source_link1'),
-                    'source_link2': value.get('source_link2'),
                     'source_type': value.get('source_type'),
                     'caption': value.get('caption')
                 }
@@ -186,7 +187,6 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
                 'source_username': src.get('source_username'),
                 'source_id': src.get('source_id'),
                 'source_link1': src.get('source_link1'),
-                'source_link2': src.get('source_link2'),
                 'source_type': src.get('source_type'),
                 'chat_type': chat_type or (message.chat.type if message else None),
                 'caption': message.caption if message else None,
@@ -558,8 +558,6 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                         'source_name': source_name,
                         'source_id': group_info.get('source_id'),
                         'source_link1': media_info.get('source_link1') or group_info.get('source_link1'),
-                        'source_link2': media_info.get('source_link2') or group_info.get('source_link2'),
-                        'source_username': media_info.get('source_username') or group_info.get('source_username'),
                         'source_type': source_type,
                         'link_chat_id': media_info.get('link_chat_id'),
                         'link_message_id': media_info.get('link_message_id'),
@@ -661,7 +659,6 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                caption=media_info.get('caption') or caption,
                                source_name=source_name, source_id=group_info.get('source_id'),
                                source_link1=media_info.get('source_link1') or group_info.get('source_link1'),
-                               source_link2=media_info.get('source_link2') or group_info.get('source_link2'),
                                source_username=media_info.get('source_username') or group_info.get('source_username'),
                                source_type=source_type,
                                message_time=media_info.get('message_date') or media_info.get('message_time'),
@@ -715,7 +712,6 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                     caption=media_info.get('caption') or caption,
                                     source_name=source_name, source_id=group_info.get('source_id'),
                                     source_link1=media_info.get('source_link1') or group_info.get('source_link1'),
-                                    source_link2=media_info.get('source_link2') or group_info.get('source_link2'),
                                     source_username=media_info.get('source_username') or group_info.get('source_username'),
                                     source_type=source_type,
                                     message_time=media_info.get('message_date') or media_info.get('message_time'),

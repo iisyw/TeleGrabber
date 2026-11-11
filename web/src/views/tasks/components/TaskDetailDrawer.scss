@@ -1,0 +1,43 @@
+.task-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--text);
+  font-size: 12px;
+
+  .detail-row {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 10px;
+
+    > span:first-child {
+      color: var(--text-muted);
+    }
+
+    > span:last-child {
+      word-break: break-word;
+    }
+
+    a {
+      color: var(--accent);
+      word-break: break-all;
+    }
+  }
+
+  .detail-break {
+    word-break: break-all;
+  }
+
+  .detail-error > span:last-child {
+    color: var(--danger);
+  }
+
+  .detail-warning {
+    padding: 10px 12px;
+    border: 1px solid rgba(247, 183, 49, 0.4);
+    border-radius: 8px;
+    background: rgba(247, 183, 49, 0.1);
+    color: #f7b731;
+    line-height: 1.5;
+  }
+}

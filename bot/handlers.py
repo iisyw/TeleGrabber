@@ -10,11 +10,13 @@ import re
 import time
 import uuid
 
-from config import logger, USER_API_ENABLED, ALLOWED_FILE_EXTENSIONS
-from utils import (
-    get_image_extension, get_video_extension, get_save_directory, get_library_stats,
-    generate_temp_filename, get_duplicate_info, append_audit,
+from core.config import logger, USER_API_ENABLED, ALLOWED_FILE_EXTENSIONS
+from core.media_files import (
+    get_image_extension, get_video_extension, get_save_directory,
+    generate_temp_filename, get_archive_ext,
 )
+from core.audit import append_audit
+from core.utils import get_library_stats, get_duplicate_info
 from bot import state
 from bot.helpers import restricted, get_forward_source_info
 from bot.media_group import (
@@ -27,11 +29,10 @@ from bot.download import (
     reply_duplicate, download_large_via_user_api, save_small_file,
     build_single_record, _single_buttons,
     get_media_label, build_download_filename, save_media_metadata,
-    get_archive_ext, save_telegram_thumbnail,
-    _safe_create_task, build_retry_context,
+    save_telegram_thumbnail,
 )
-import task_manager
-import user_api
+from core import task_manager
+from core import user_api
 
 
 @restricted
@@ -114,7 +115,7 @@ async def _process_link(update, context, args):
     """链接下载核心逻辑，/link 命令和自动识别链接共用。"""
     if not USER_API_ENABLED:
         await update.message.reply_text(
-            "❌ User API 未配置，无法通过消息链接下载。\n请先配置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH。",
+            "❌ User API 未配置，无法通过消息链接下载。\n请在 conf/config.toml 的 [telegram] 节配置 api_id 和 api_hash。",
             reply_to_message_id=update.message.message_id,
         )
         return
@@ -245,7 +246,6 @@ async def _process_link(update, context, args):
             'source_username': first_item.get('source_username'),
             'source_id': first_item.get('source_id'),
             'source_link1': first_item.get('source_link1') or ref_text,
-            'source_link2': first_item.get('source_link2'),
             'source_type': first_item.get('source_type'),
             'caption': first_item.get('caption'),
             'chat_type': update.effective_chat.type,
@@ -276,7 +276,6 @@ async def _process_link(update, context, args):
         'source_name': media_info.get('source_name'),
         'source_id': media_info.get('source_id'),
         'source_link1': media_info.get('source_link1') or ref_text,
-        'source_link2': media_info.get('source_link2'),
         'source_username': media_info.get('source_username'),
         'source_type': media_info.get('source_type'),
         'chat_id': update.effective_chat.id,

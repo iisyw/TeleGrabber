@@ -4,8 +4,9 @@ import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import logger
-from utils import get_save_directory, delete_media_records, get_duplicate_info
+from core.config import logger
+from core.media_files import get_save_directory
+from core.utils import delete_media_records, get_duplicate_info
 from bot import state
 from bot.media_group import process_media_group
 from bot.download import (
