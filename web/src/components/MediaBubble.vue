@@ -61,6 +61,7 @@
         <div
           class="media-grid g1"
           :class="{ 'video-fallback': isVideo && (!thumb || posterFailed) }"
+          :style="singleMediaStyle"
           @click="$emit('open', items, 0)"
         >
           <template v-if="isVideo">
@@ -143,6 +144,28 @@ const isVideo = computed(() => refItem.value.media_type === 'video');
 const thumb = computed(() => thumbUrl(refItem.value));
 const originalUrl = computed(() => mediaUrl(refItem.value));
 const posterFailed = ref(false);
+
+const singleMediaStyle = computed(() => {
+  const w = Number(refItem.value.width);
+  const h = Number(refItem.value.height);
+  if (w > 0 && h > 0) {
+    // 限制单张媒体在最大 400x400 的容器内等比缩放，提前预占真实物理宽高，防止图片异步载入时高度塌陷与抖动
+    const maxW = 400;
+    const maxH = 400;
+    const scale = Math.min(maxW / w, maxH / h, 1);
+    const boxW = Math.round(w * scale);
+    const boxH = Math.round(h * scale);
+    return {
+      width: `${boxW}px`,
+      height: `${boxH}px`,
+      maxWidth: '100%',
+      aspectRatio: `${w} / ${h}`,
+    };
+  }
+  return {
+    maxWidth: '400px',
+  };
+});
 
 const caption = computed(() => {
   if (isMulti.value) {

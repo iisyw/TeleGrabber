@@ -1,4 +1,5 @@
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import {
   cancelTask, fetchTaskDetail, fetchTasks, pauseTask, resumeTask,
@@ -7,21 +8,41 @@ import {
 import { buildTaskEntries, detailPrivateLink as buildDetailPrivateLink } from './taskUtils';
 
 const PAGE_SIZE = 50;
+const VALID_STATUSES = new Set(['', 'downloading', 'queued', 'success', 'failed', 'paused', 'cancelled']);
 
 export function useTasks() {
+  const route = useRoute();
+  const router = useRouter();
+
+  function resolveInitialStatus() {
+    const qStatus = route.query.status;
+    if (typeof qStatus === 'string' && VALID_STATUSES.has(qStatus)) {
+      return qStatus;
+    }
+    const saved = sessionStorage.getItem('telegrabber-task-status');
+    if (saved && VALID_STATUSES.has(saved)) {
+      return saved;
+    }
+    return '';
+  }
+
+  const initialStatus = resolveInitialStatus();
+  const initialSource = typeof route.query.source_name === 'string' ? route.query.source_name.trim() : '';
+  const initialGroup = typeof route.query.media_group_id === 'string' ? route.query.media_group_id.trim() : '';
+
   const tasks = ref([]);
   const counts = ref({});
   const total = ref(0);
-  const status = ref('');
+  const status = ref(initialStatus);
   const loading = ref(false);
   const error = ref('');
   const busy = ref(false);
   const detailOpen = ref(false);
   const detail = ref(null);
-  const filterSource = ref('');
-  const filterGroup = ref('');
-  const appliedSource = ref('');
-  const appliedGroup = ref('');
+  const filterSource = ref(initialSource);
+  const filterGroup = ref(initialGroup);
+  const appliedSource = ref(initialSource);
+  const appliedGroup = ref(initialGroup);
   const expandedGroups = ref({});
   const notifyEnabled = ref(localStorage.getItem('telegrabber-task-notify') === '1');
 
@@ -107,9 +128,30 @@ export function useTasks() {
     }
   }
 
+  function syncQuery() {
+    const nextQuery = { ...route.query };
+    if (status.value) {
+      nextQuery.status = status.value;
+    } else {
+      delete nextQuery.status;
+    }
+    if (appliedSource.value) {
+      nextQuery.source_name = appliedSource.value;
+    } else {
+      delete nextQuery.source_name;
+    }
+    if (appliedGroup.value) {
+      nextQuery.media_group_id = appliedGroup.value;
+    } else {
+      delete nextQuery.media_group_id;
+    }
+    router.replace({ query: nextQuery });
+  }
+
   function applyFilters() {
     appliedSource.value = filterSource.value.trim();
     appliedGroup.value = filterGroup.value.trim();
+    syncQuery();
     load(false);
   }
 
@@ -118,14 +160,44 @@ export function useTasks() {
     filterGroup.value = '';
     appliedSource.value = '';
     appliedGroup.value = '';
+    syncQuery();
     load(false);
   }
 
   function selectStatus(value) {
     if (status.value === value) return;
     status.value = value;
+    sessionStorage.setItem('telegrabber-task-status', value);
+    syncQuery();
     load(false);
   }
+
+  watch(
+    () => route.query.status,
+    (newStatus) => {
+      const target = typeof newStatus === 'string' && VALID_STATUSES.has(newStatus) ? newStatus : '';
+      if (status.value !== target) {
+        status.value = target;
+        sessionStorage.setItem('telegrabber-task-status', target);
+        load(false);
+      }
+    }
+  );
+
+  watch(
+    () => [route.query.source_name, route.query.media_group_id],
+    ([newSource, newGroup]) => {
+      const s = typeof newSource === 'string' ? newSource.trim() : '';
+      const g = typeof newGroup === 'string' ? newGroup.trim() : '';
+      if (appliedSource.value !== s || appliedGroup.value !== g) {
+        filterSource.value = s;
+        filterGroup.value = g;
+        appliedSource.value = s;
+        appliedGroup.value = g;
+        load(false);
+      }
+    }
+  );
 
   async function openDetail(task) {
     detailOpen.value = true;
@@ -245,6 +317,13 @@ export function useTasks() {
   }
 
   onMounted(() => {
+    if (
+      (status.value && route.query.status !== status.value) ||
+      (appliedSource.value && route.query.source_name !== appliedSource.value) ||
+      (appliedGroup.value && route.query.media_group_id !== appliedGroup.value)
+    ) {
+      syncQuery();
+    }
     load(false);
     timer = setInterval(refresh, 3000);
   });

@@ -8,7 +8,7 @@ import threading
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
-from core.config import DATA_DIR, SAVE_DIR
+from core.config import DATA_DIR
 
 # 媒体组收集状态文件（存储于运行数据目录）
 MEDIA_GROUP_COLLECTION_FILE = os.path.join(DATA_DIR, "media_groups_collection.json")
@@ -20,8 +20,8 @@ user_notification_cache = defaultdict(int)
 # 设置提示冷却时间（秒）
 NOTIFICATION_COOLDOWN = 60
 
-# 添加全局锁，确保同一时间只处理一个媒体组
-media_group_lock = threading.Lock()
+# 添加全局可重入锁，确保同一时间只处理一个媒体组且允许同线程安全嵌套调用
+media_group_lock = threading.RLock()
 # 添加待处理媒体组队列
 pending_media_groups = deque()
 # 标记是否有正在处理的媒体组
@@ -38,14 +38,14 @@ processed_groups_history = {}
 download_executor = ThreadPoolExecutor(max_workers=5)
 # 用于防止同一媒体组内多个相同文件同时保存导致的查重冲突
 saving_unique_ids = set()
-saving_lock = threading.Lock()
+saving_lock = threading.RLock()
 
 # --- 单条消息下载记录 ---
 # 支持单张消息的"重新下载/强制重下/删除"按钮回调。
 # 格式: {single_key: record_dict}，record 含 file_id/file_unique_id/media_type/
 #       date_dir/final_filename/caption/source.../chat_id/message_id/file_size/is_dup
 single_records = {}
-single_lock = threading.Lock()
+single_lock = threading.RLock()
 # 历史上限，防止内存无限增长（保留最近 N 条）
 SINGLE_RECORDS_LIMIT = 200
 

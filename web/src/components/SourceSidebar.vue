@@ -33,7 +33,11 @@
         <div class="source-info">
           <div class="source-name" :title="item.remark ? `${item.name}（${item.remark}）` : item.name">
             <span v-if="item.badge" :class="['source-badge', item.badgeClass]">{{ item.badge }}</span>
-            <span v-if="item.pinned" class="source-pin">★</span>
+            <span v-if="item.pinned" class="source-pin" title="已置顶">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+                <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5v6l1 1 1-1v-6h5v-2l-2-2z" />
+              </svg>
+            </span>
             <span class="source-name-text">{{ item.displayName }}</span>
             <span v-if="item.protected" class="source-tag-protected" title="该会话禁止转发/内容保护，机器人无法转发，只能由 User API 尝试下载">禁转</span>
           </div>
@@ -55,7 +59,9 @@
             title="重试该来源的失败任务"
             @click="retryFailed(item)"
           >
-            ↻
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19" />
+            </svg>
           </button>
           <button
             type="button"
@@ -64,15 +70,24 @@
             :title="item.pinned ? '取消置顶' : '置顶'"
             @click="togglePin(item)"
           >
-            ★
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+              <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5v6l1 1 1-1v-6h5v-2l-2-2z" />
+            </svg>
           </button>
           <button
             type="button"
             class="source-action"
+            :class="{ active: item.hidden }"
             :title="item.hidden ? '取消隐藏' : '隐藏来源'"
             @click="toggleHide(item)"
           >
-            {{ item.hidden ? '◉' : '○' }}
+            <svg v-if="item.hidden" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24M1 1l22 22" />
+            </svg>
+            <svg v-else viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
           </button>
           <button
             type="button"
@@ -80,7 +95,10 @@
             title="修改备注"
             @click="rename(item)"
           >
-            ✎
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
           </button>
         </div>
       </div>

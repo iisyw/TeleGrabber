@@ -6,7 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core.config import logger
 from core.media_files import get_save_directory
-from core.utils import delete_media_records, get_duplicate_info
+from core.utils import delete_media_records
 from bot import state
 from bot.media_group import process_media_group
 from bot.download import (

@@ -34,8 +34,11 @@ conf/config.toml
 # 下载的媒体文件
 downloads/
 
-# 日志文件
+# 日志与临时文件
 *.log
+tmp/
+*.tmp
+.DS_Store
 
 # Docker
 .dockerignore

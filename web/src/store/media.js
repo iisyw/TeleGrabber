@@ -100,8 +100,9 @@ export const useMediaStore = defineStore('media', {
     /**
      * 加载媒体列表。reset=true 时开启新一轮请求，旧的请求结果会被丢弃，
      * 避免切换来源/搜索时旧响应覆盖新状态。
+     * beforeApply 可在数据写入 Pinia 前执行（用于精准无感捕捉滚动锚点）。
      */
-    async loadMedia(reset = false) {
+    async loadMedia(reset = false, beforeApply = null) {
       if (!reset && (this.isLoading || this.isLastPage)) return false;
 
       const seq = ++this._seq;
@@ -124,6 +125,9 @@ export const useMediaStore = defineStore('media', {
           this.cursorTime = last.message_time || last.datetime || '';
           this.cursorId = last.id;
         }
+        if (typeof beforeApply === 'function') {
+          beforeApply(data);
+        }
         this.mediaList = reset ? data : this.mediaList.concat(data);
         return true;
       } catch (error) {
@@ -134,8 +138,8 @@ export const useMediaStore = defineStore('media', {
       }
     },
 
-    loadMore() {
-      return this.loadMedia(false);
+    loadMore(beforeApply = null) {
+      return this.loadMedia(false, beforeApply);
     },
 
     async refresh() {

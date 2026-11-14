@@ -25,7 +25,8 @@ from bot.media_group import (
 )
 from bot.download import (
     LARGE_FILE_THRESHOLD, MEDIA_LABELS,
-    DOWNLOAD_METHOD_USER,
+    DOWNLOAD_METHOD_USER, DOWNLOAD_METHOD_BOT,
+    _safe_create_task, build_retry_context,
     reply_duplicate, download_large_via_user_api, save_small_file,
     build_single_record, _single_buttons,
     get_media_label, build_download_filename, save_media_metadata,
@@ -373,6 +374,9 @@ async def _process_link(update, context, args):
             return
         progress_state["last_time"] = now
         progress_state["last_percent"] = percent
+        # 100% 由下载完成后的完成提示统一发送，避免与完成提示并发编辑触发 Telegram 429 导致终态卡在 100%
+        if percent >= 100:
+            return
 
         async def _edit():
             try:
@@ -433,19 +437,17 @@ async def _process_link(update, context, args):
                 task_id, 'failed',
                 error=error_msg or "User API 下载失败",
             )
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=status_message.message_id,
-        text=(
-            f"📋 检测到资源\n"
-            f"类型: {label}\n"
-            f"大小: {size_str}\n"
-            f"来源: {media_info.get('source_name') or '未知'}\n\n"
-            f"{'✅' if not has_failed else '❌'} {label}{'已保存' if not has_failed else '保存失败'}"
-        ),
-        parse_mode='Markdown',
-        disable_web_page_preview=True,
+    result_text = (
+        f"📋 检测到资源\n"
+        f"类型: {label}\n"
+        f"大小: {size_str}\n"
+        f"来源: {media_info.get('source_name') or '未知'}\n\n"
+        f"{'✅' if not has_failed else '❌'} {label}{'已保存' if not has_failed else '保存失败'}"
+    )
+    await _edit_or_reply(
+        context, update, status_message, result_text,
         reply_markup=_single_buttons(single_key, is_dup=False, has_failed=has_failed),
+        parse_mode='Markdown',
     )
 
 

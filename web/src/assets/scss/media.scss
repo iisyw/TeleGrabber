@@ -6,6 +6,7 @@
 .media-grid.g1 {
   position: relative;
   display: flex;
+  align-items: center;
   justify-content: center;
   background: var(--media-bg);
   cursor: pointer;
@@ -14,8 +15,9 @@
     display: block;
     max-width: 100%;
     max-height: 400px;
-    width: auto;
-    height: auto;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
   }
 
   &.video-fallback {
@@ -59,9 +61,4 @@
   }
 }
 
-/* 长列表性能提示 */
-.message,
-.date-separator {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 360px;
-}
+

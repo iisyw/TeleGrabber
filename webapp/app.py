@@ -1,12 +1,13 @@
 """FastAPI 应用组装：中间件、异常处理、静态资源、路由注册与启动。"""
 
 import logging
+import mimetypes
 import os
 import uuid
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import uvicorn
@@ -33,7 +34,7 @@ async def request_context(request: Request, call_next):
     set_request_id(request_id)
     response = await call_next(request)
     response.headers["X-Request-Id"] = request_id
-    if response.status_code == 200 and request.url.path.startswith(("/assets/", "/media/")):
+    if response.status_code in (200, 206) and request.url.path.startswith(("/assets/", "/media/")):
         response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
     return response
 
@@ -97,9 +98,83 @@ app.include_router(tasks.router)
 app.include_router(storage.router)
 app.include_router(status.router)
 
-# 媒体文件映射（用于预览下载的内容）
+# 媒体文件映射（支持 HTTP 206 Partial Content 分片流式缓冲播放）
 os.makedirs(SAVE_DIR, exist_ok=True)
-app.mount("/media", StaticFiles(directory=SAVE_DIR), name="media")
+
+
+@app.get("/media/{file_path:path}")
+def serve_media_file(file_path: str, request: Request):
+    """支持 Range 请求的媒体文件流式服务，让大视频无需等待全量下载即可边下边播与拖动进度条。"""
+    full_path = os.path.abspath(os.path.join(SAVE_DIR, file_path))
+    save_root = os.path.abspath(SAVE_DIR)
+    if not (full_path == save_root or full_path.startswith(save_root + os.sep)):
+        raise HTTPException(status_code=403, detail="禁止访问")
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="媒体文件不存在")
+
+    stat = os.stat(full_path)
+    file_size = stat.st_size
+    media_type, _ = mimetypes.guess_type(full_path)
+    media_type = media_type or "application/octet-stream"
+
+    range_header = request.headers.get("Range")
+    if not range_header or not range_header.startswith("bytes="):
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        }
+        return FileResponse(full_path, media_type=media_type, headers=headers)
+
+    try:
+        range_spec = range_header.replace("bytes=", "").strip()
+        parts = range_spec.split("-", 1)
+        start_raw, end_raw = parts[0].strip(), parts[1].strip()
+
+        if start_raw and end_raw:
+            start = int(start_raw)
+            end = int(end_raw)
+        elif start_raw:
+            start = int(start_raw)
+            end = file_size - 1
+        elif end_raw:
+            start = file_size - int(end_raw)
+            end = file_size - 1
+        else:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+        if start >= file_size or end >= file_size or start > end:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+        content_length = end - start + 1
+
+        def stream_chunk():
+            with open(full_path, "rb") as f:
+                f.seek(start)
+                remaining = content_length
+                chunk_size = 128 * 1024  # 128KB 块
+                while remaining > 0:
+                    read_len = min(chunk_size, remaining)
+                    data = f.read(read_len)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(content_length),
+            "ETag": f'"{stat.st_mtime}-{file_size}"',
+        }
+        return StreamingResponse(
+            stream_chunk(),
+            status_code=206,
+            headers=headers,
+            media_type=media_type,
+        )
+    except Exception:
+        return FileResponse(full_path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
 
 # Vue 构建产物（web/dist）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

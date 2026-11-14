@@ -116,9 +116,10 @@ export function buildDisplayGroups(items) {
 
   items.forEach((item) => {
     const d = datePart(item.message_time || item.datetime);
+    let dateHeader = null;
     if (d !== curDate) {
       curDate = d;
-      groups.push({ type: 'date', date: d, items: [] });
+      dateHeader = d;
     }
     const gid = (item.media_group_id || '').trim();
     const isGrouped = Boolean(gid);
@@ -128,10 +129,10 @@ export function buildDisplayGroups(items) {
       if (last && last.type === 'media-group' && last.groupId === gid) {
         last.items.push(item);
       } else {
-        groups.push({ type: 'media-group', groupId: gid, items: [item] });
+        groups.push({ type: 'media-group', groupId: gid, items: [item], dateHeader });
       }
     } else {
-      groups.push({ type: 'single', items: [item] });
+      groups.push({ type: 'single', items: [item], dateHeader });
     }
   });
 
@@ -170,7 +171,6 @@ export function mergeDisplayGroups(groups) {
 }
 
 export function displayGroupKey(group) {
-  if (group.type === 'date') return `date:${group.date}`;
   if (group.type === 'media-group') return `group:${group.groupId}`;
   return `single:${group.items[0] && group.items[0].id}`;
 }

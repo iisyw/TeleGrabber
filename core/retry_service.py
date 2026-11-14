@@ -357,8 +357,8 @@ def _check_disk(expected_size):
         )
 
 
-def _download_via_bot(file_id, final_path):
-    """使用独立 Bot 实例通过 Bot API 下载小文件，作为 User API 失败后的回退。"""
+def _download_via_bot(file_id, final_path, max_retries=3):
+    """使用独立 Bot 实例通过 Bot API 下载小文件，作为 User API 失败后的回退（带网络瞬态重试）。"""
     async def run():
         request = HTTPXRequest(
             proxy=PROXY,
@@ -367,14 +367,34 @@ def _download_via_bot(file_id, final_path):
         )
         bot = Bot(TOKEN, request=request)
         async with bot:
-            tg_file = await bot.get_file(file_id)
-            await asyncio.wait_for(
-                tg_file.download_to_drive(final_path),
-                timeout=DOWNLOAD_TIMEOUT,
-            )
+            for attempt in range(1, max_retries + 1):
+                try:
+                    tg_file = await bot.get_file(file_id)
+                    await asyncio.wait_for(
+                        tg_file.download_to_drive(final_path),
+                        timeout=DOWNLOAD_TIMEOUT,
+                    )
+                    return
+                except Exception as e:
+                    if os.path.exists(final_path):
+                        try:
+                            os.remove(final_path)
+                        except OSError:
+                            pass
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"Bot API 重试下载网络异常 (第{attempt}/{max_retries}次): {e}，1秒后重试..."
+                        )
+                        await asyncio.sleep(1)
+                    else:
+                        raise
 
-    asyncio.run(run())
-    return os.path.exists(final_path)
+    try:
+        asyncio.run(run())
+        return os.path.exists(final_path)
+    except Exception as e:
+        logger.error(f"Bot API 回退下载最终失败: {e}")
+        return False
 
 
 def _stub_user(context):

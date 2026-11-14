@@ -117,6 +117,7 @@ async def run_bot():
 
     logger.info("机器人已启动，正在监听消息...")
     runtime_state.mark_bot_started(app.bot)
+    bot.start_pending_media_groups(app.job_queue)
 
     # 用一个永不完成的事件挂起，直到收到停止信号
     stop_event = asyncio.Event()

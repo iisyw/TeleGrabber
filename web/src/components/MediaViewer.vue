@@ -16,16 +16,40 @@
             {{ items.length > 1 ? `${index + 1} / ${items.length}` : '' }}
           </div>
           <div class="modal-media">
-            <video
-              v-if="current.media_type === 'video'"
-              :key="`video-${current.id}`"
-              ref="videoEl"
-              controls
-              autoplay
-              :src="mediaUrl(current)"
-              @loadedmetadata="applyVideoProgress"
-              @timeupdate="saveVideoProgress"
-            />
+            <template v-if="current.media_type === 'video'">
+              <video
+                v-if="!videoError"
+                :key="`video-${current.id}`"
+                ref="videoEl"
+                controls
+                autoplay
+                preload="metadata"
+                :src="mediaUrl(current)"
+                @loadedmetadata="applyVideoProgress"
+                @timeupdate="onTimeUpdate"
+                @error="onVideoError"
+              />
+              <div v-if="decodeWarning" class="video-codec-tip">
+                <div class="video-codec-tip-text">
+                  ⚠️ 画面未能正常解码（仅音频在播放）：该视频采用 HEVC (H.265) 编码，当前浏览器内核不具备原生解码器。
+                </div>
+                <div class="video-codec-tip-actions">
+                  <button class="btn btn-small" @click="copyFilePath">复制本地文件名</button>
+                  <button class="btn btn-small" @click="copyLink">复制播放链接</button>
+                </div>
+              </div>
+              <div v-else-if="videoError" class="video-error-overlay">
+                <div class="video-error-icon">⚠️</div>
+                <div class="video-error-title">该视频无法在网页中直接播放</div>
+                <div class="video-error-desc">
+                  该视频多为 HEVC (H.265) 编码或特殊音轨，当前浏览器内核不具备原生解码器。
+                </div>
+                <div class="video-error-desc">
+                  媒体文件已完整归档在本地磁盘，建议使用 VLC、IINA 或 PotPlayer 打开播放：
+                </div>
+                <div class="video-error-path">{{ current.filename }}</div>
+              </div>
+            </template>
             <img v-else :key="`image-${current.id}`" :src="mediaUrl(current)" alt="" />
           </div>
         </div>
@@ -115,7 +139,13 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'update:index', 'delete']);
 
 const showExtra = ref(false);
+const videoError = ref(false);
+const decodeWarning = ref(false);
 const videoEl = ref(null);
+
+function onVideoError() {
+  videoError.value = true;
+}
 const store = useMediaStore();
 const current = computed(() => props.items[props.index] || null);
 
@@ -210,6 +240,8 @@ watch(
   () => [props.modelValue, props.index],
   () => {
     showExtra.value = false;
+    videoError.value = false;
+    decodeWarning.value = false;
     nextTick(() => {
       if (videoEl.value) applyVideoProgress();
     });
@@ -331,6 +363,36 @@ function saveVideoProgress() {
   if (!video || !item || item.media_type !== 'video') return;
   if (!video.currentTime || video.currentTime < 3) return;
   localStorage.setItem(videoKey(item), String(video.currentTime));
+}
+
+function onTimeUpdate() {
+  saveVideoProgress();
+  if (!decodeWarning.value) {
+    const video = videoEl.value;
+    if (video && video.currentTime > 0.5 && !video.paused) {
+      if (typeof video.getVideoPlaybackQuality === 'function') {
+        const q = video.getVideoPlaybackQuality();
+        if (q && q.totalVideoFrames === 0) {
+          decodeWarning.value = true;
+        }
+      } else if (typeof video.webkitDecodedFrameCount === 'number') {
+        if (video.webkitDecodedFrameCount === 0) {
+          decodeWarning.value = true;
+        }
+      }
+    }
+  }
+}
+
+async function copyFilePath() {
+  const item = current.value;
+  if (!item || !item.filename) return;
+  try {
+    await navigator.clipboard.writeText(item.filename);
+    ElMessage.success('文件名已复制');
+  } catch {
+    ElMessage.warning('复制失败');
+  }
 }
 
 async function copyLink() {

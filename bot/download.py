@@ -11,17 +11,16 @@ import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from core.config import logger, USER_API_ENABLED, DOWNLOAD_TIMEOUT
+from core.config import logger, DOWNLOAD_TIMEOUT
 from core import task_manager
 from core.media_files import (
-    get_save_directory, generate_temp_filename, get_image_extension,
-    get_video_extension, get_archive_ext,
+    generate_temp_filename, get_image_extension,
+    get_video_extension,
 )
 from core.telegram_meta import get_message_date, get_message_id, utc_to_local
 from core.thumbnails import save_thumbnail_bytes, thumb_exists
-from core.utils import save_to_db, get_duplicate_info, delete_media_records
+from core.utils import save_to_db, get_duplicate_info
 from core import user_api
-from bot import state
 
 # 大文件阈值：超过此大小走 User API (MTProto)，因为 Bot API 限制 20MB
 LARGE_FILE_THRESHOLD = 20 * 1024 * 1024
@@ -194,6 +193,9 @@ def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix, heade
         st["last_percent"] = percent
         if task_id:
             task_manager.update_progress(task_id, current, total)
+        # 100% 由主流程最终结果统一发送完成提示，避免并发编辑触发 Telegram 限流
+        if percent >= 100:
+            return
 
         async def _edit():
             try:
@@ -444,6 +446,33 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
     return final_filename
 
 
+async def download_tg_file_with_retry(file_source, dest_path, bot=None, timeout=DOWNLOAD_TIMEOUT, max_retries=3):
+    """通过 Bot API 下载文件，带瞬态网络异常（断开/未响应/不完整响应等）自动重试机制。"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            if isinstance(file_source, str):
+                if not bot:
+                    raise ValueError("使用 file_id 下载必须提供 bot 实例")
+                tg_file = await bot.get_file(file_source)
+            elif hasattr(file_source, "get_file"):
+                tg_file = await file_source.get_file()
+            else:
+                tg_file = file_source
+            await asyncio.wait_for(tg_file.download_to_drive(dest_path), timeout=timeout)
+            return True
+        except Exception as e:
+            if os.path.exists(dest_path):
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
+            if attempt < max_retries:
+                logger.warning(f"Bot API 下载网络异常 (第{attempt}/{max_retries}次): {e}，1秒后重试...")
+                await asyncio.sleep(1)
+            else:
+                raise
+
+
 async def download_small_from_record(bot, record):
     """基于 record 通过 Bot API 重新下载小文件。返回最终文件名或 None。"""
     media_type = record['media_type']
@@ -479,8 +508,7 @@ async def download_small_from_record(bot, record):
     )
     task_manager.update_task(task_id, status='downloading')
     try:
-        tg_file = await bot.get_file(record['file_id'])
-        await asyncio.wait_for(tg_file.download_to_drive(temp_path), timeout=DOWNLOAD_TIMEOUT)
+        await download_tg_file_with_retry(record['file_id'], temp_path, bot=bot, timeout=DOWNLOAD_TIMEOUT)
 
         if media_type == 'video':
             ext = get_video_extension(temp_path)
@@ -700,8 +728,7 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
     task_manager.update_task(task_id, status='downloading')
 
     try:
-        media_file = await media_obj.get_file()
-        await asyncio.wait_for(media_file.download_to_drive(temp_path), timeout=DOWNLOAD_TIMEOUT)
+        await download_tg_file_with_retry(media_obj, temp_path, timeout=DOWNLOAD_TIMEOUT)
 
         ext = detect_ext(temp_path)
         final_filename = f"{temp_filename}{ext}"

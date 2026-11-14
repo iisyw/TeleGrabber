@@ -3,6 +3,7 @@
   justify-content: center;
   margin: 16px 0 12px;
   user-select: none;
+  overflow-anchor: none;
 
   &::before,
   &::after {

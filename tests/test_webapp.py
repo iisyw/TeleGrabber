@@ -92,6 +92,25 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(len(res_200["data"]["tasks"]), 1)
         self.assertEqual(res_200["data"]["tasks"][0]["file_unique_id"], "f2")
 
+    def test_tasks_queued_and_counts(self):
+        t1 = task_manager.create_task(
+            file_unique_id="queued-f1",
+            batch_id="batch-q",
+            source_name="chan-q",
+        )
+        t2 = task_manager.create_task(
+            file_unique_id="queued-f2",
+            batch_id="batch-q",
+            source_name="chan-q",
+        )
+        res = tasks_api.get_tasks(limit=50, offset=0)
+        self.assertEqual(res["code"], 10000)
+        self.assertEqual(res["data"]["counts"].get("queued"), 2)
+
+        res_q = tasks_api.get_tasks(status="queued", limit=50, offset=0)
+        self.assertEqual(res_q["code"], 10000)
+        self.assertEqual(len(res_q["data"]["tasks"]), 2)
+
     def test_duplicates_returns_skipped_tasks(self):
         tid = task_manager.create_task(
             file_unique_id="dup-unique-1",
@@ -118,6 +137,28 @@ class WebAppTestCase(unittest.TestCase):
         task_manager.stop_task_prune_scheduler()
         task_manager._prune_thread.join(timeout=1)
         self.assertFalse(task_manager._prune_thread.is_alive())
+
+    def test_media_range_requests(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(webapp_app)
+
+        test_file_rel = "test_range.txt"
+        test_file_path = os.path.join(self.temp_dir.name, test_file_rel)
+        with open(test_file_path, "wb") as f:
+            f.write(b"0123456789abcdefghij")
+
+        with patch("webapp.app.SAVE_DIR", self.temp_dir.name):
+            # 完整请求
+            res_full = client.get(f"/media/{test_file_rel}")
+            self.assertEqual(res_full.status_code, 200)
+            self.assertEqual(res_full.content, b"0123456789abcdefghij")
+            self.assertEqual(res_full.headers.get("accept-ranges"), "bytes")
+
+            # Range 切片请求
+            res_range = client.get(f"/media/{test_file_rel}", headers={"Range": "bytes=0-9"})
+            self.assertEqual(res_range.status_code, 206)
+            self.assertEqual(res_range.content, b"0123456789")
+            self.assertEqual(res_range.headers.get("content-range"), "bytes 0-9/20")
 
     def test_api_response_envelope(self):
         from webapp.api_response import RESOURCE_NOT_FOUND, error_payload, ok, set_request_id

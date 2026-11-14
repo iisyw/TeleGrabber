@@ -197,7 +197,7 @@
       <div v-if="status.tasks.last_failed" class="last-failed">
         <div class="last-failed-title">
           最近失败任务
-          <router-link to="/tasks" class="last-failed-link">去任务中心</router-link>
+          <router-link to="/tasks?status=failed" class="last-failed-link">去任务中心</router-link>
         </div>
         <div class="last-failed-row">
           <span class="task-filename">{{ status.tasks.last_failed.filename || status.tasks.last_failed.file_unique_id || '-' }}</span>

@@ -7,7 +7,7 @@ from pyrogram.errors import (
     ChatWriteForbidden, FloodWait, ChatForwardsRestricted,
 )
 from .config import (
-    API_ID, API_HASH, PROXY, logger, SAVE_DIR, DOWNLOAD_RETRIES, DATA_DIR,
+    API_ID, API_HASH, PROXY, logger, DOWNLOAD_RETRIES, DATA_DIR,
     DOWNLOAD_TIMEOUT, DOWNLOAD_STALL_TIMEOUT, TASK_MIN_FREE_MB,
     USER_API_ENABLED,
 )
@@ -732,7 +732,6 @@ def run_forward_to_bot(bot_target, from_chat_id, message_id):
 
 def stop_user_api():
     """停止 User API 客户端 (优雅退出)"""
-    global _app, _loop
     if _app and _app.is_connected:
         try:
             logger.info("正在停止 User API 客户端...")

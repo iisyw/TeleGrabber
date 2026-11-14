@@ -17,26 +17,19 @@
         <span>加载更早的消息...</span>
       </div>
 
-      <div
-        v-if="displayGroups.length"
-        class="feed-virtual"
-        :style="{ height: `${totalSize}px` }"
-      >
+      <div v-if="displayGroups.length" ref="feedListRef" class="feed-list">
         <div
-          v-for="virtualRow in virtualRows"
-          :key="virtualRow.key"
-          :ref="measureElement"
-          :data-index="virtualRow.index"
-          class="feed-virtual-item"
-          :style="{ transform: `translateY(${virtualRow.start}px)` }"
+          v-for="group in displayGroups"
+          :key="displayGroupKey(group)"
+          :data-group-key="displayGroupKey(group)"
+          class="feed-item"
         >
           <DateSeparator
-            v-if="virtualRow.group.type === 'date'"
-            :date="virtualRow.group.date"
+            v-if="group.dateHeader"
+            :date="group.dateHeader"
           />
           <MediaBubble
-            v-else
-            :group="virtualRow.group"
+            :group="group"
             @open="openViewer"
             @delete="onDelete"
           />
@@ -68,8 +61,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue';
-import { useVirtualizer } from '@tanstack/vue-virtual';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import SourceSidebar from '@/components/SourceSidebar.vue';
 import ChatHeader from '@/components/ChatHeader.vue';
@@ -85,6 +77,7 @@ import {
 
 const store = useMediaStore();
 const feedRef = ref(null);
+const feedListRef = ref(null);
 
 const viewerOpen = ref(false);
 const viewerItems = ref([]);
@@ -95,41 +88,22 @@ const displayGroups = computed(() => {
   return mergeDisplayGroups(buildDisplayGroups(sorted));
 });
 
-const virtualizer = useVirtualizer(computed(() => ({
-  count: displayGroups.value.length,
-  getScrollElement: () => feedRef.value,
-  estimateSize: () => 360,
-  overscan: 6,
-  getItemKey: (index) => {
-    const group = displayGroups.value[index];
-    return group ? displayGroupKey(group) : index;
-  },
-})));
-
-const virtualItems = computed(() => virtualizer.value.getVirtualItems());
-const totalSize = computed(() => virtualizer.value.getTotalSize());
-const virtualRows = computed(() => virtualItems.value
-  .map((row) => ({ ...row, group: displayGroups.value[row.index] }))
-  .filter((row) => row.group));
-
 let lastLoadAt = 0;
-
-function measureElement(el) {
-  if (el) virtualizer.value.measureElement(el);
-}
+let isRestoringScroll = false;
+let isAtBottom = true;
+let resizeObserver = null;
 
 function scrollToBottom() {
-  const count = displayGroups.value.length;
-  if (!count) return;
-  virtualizer.value.scrollToIndex(count - 1, { align: 'end' });
-  setTimeout(() => {
-    if (displayGroups.value.length) {
-      virtualizer.value.scrollToIndex(displayGroups.value.length - 1, { align: 'end' });
-    }
-  }, 60);
+  const feed = feedRef.value;
+  if (!feed) return;
+  feed.scrollTop = feed.scrollHeight;
+  requestAnimationFrame(() => {
+    if (feed) feed.scrollTop = feed.scrollHeight;
+  });
 }
 
 async function afterReset(promise) {
+  isAtBottom = true;
   await promise;
   await nextTick();
   scrollToBottom();
@@ -155,24 +129,83 @@ function onFilter(filters) {
   afterReset(store.setFilters(filters));
 }
 
+/**
+ * 参考 Telegram Web K (ScrollSaver.ts) 物理气泡锚点机制：
+ * 寻找当前视口内第一条真实可见的气泡元素（.bubble），不受日期分割线增删干扰。
+ * 在数据即将注入 DOM 的前一瞬间精准快照其相对于视口顶部的真实坐标。
+ */
+function findTopVisibleBubble() {
+  const feed = feedRef.value;
+  if (!feed) return null;
+  const containerRect = feed.getBoundingClientRect();
+  const bubbles = feed.querySelectorAll('.bubble');
+  for (const el of bubbles) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom > containerRect.top + 8) {
+      const itemEl = el.closest('.feed-item');
+      return {
+        el,
+        key: itemEl ? itemEl.dataset.groupKey : null,
+        topOffset: rect.top - containerRect.top,
+      };
+    }
+  }
+  return null;
+}
+
 async function onScroll() {
   const feed = feedRef.value;
-  if (!feed || store.isLoading || store.isLastPage) return;
+  if (!feed) return;
+
+  // 距离底部 60px 以内标记为吸底状态，图片等资源后续加载展开时自动跟随贴底
+  const distanceToBottom = feed.scrollHeight - feed.clientHeight - feed.scrollTop;
+  isAtBottom = distanceToBottom <= 60;
+
+  if (store.isLoading || store.isLastPage || isRestoringScroll) return;
   if (feed.scrollTop > 300) return;
   if (Date.now() - lastLoadAt < 600) return;
 
   lastLoadAt = Date.now();
-  const oldHeight = feed.scrollHeight;
-  const loaded = await store.loadMore();
-  if (!loaded) return;
+  isRestoringScroll = true;
 
-  await nextTick();
-  // 保持底部视口位置：把新插入到顶部的旧消息高度补回滚动偏移
-  requestAnimationFrame(() => {
-    if (!feedRef.value) return;
-    const delta = feedRef.value.scrollHeight - oldHeight;
-    if (delta > 0) feedRef.value.scrollTop += delta;
-  });
+  try {
+    let anchor = null;
+    // 关键优化：在网络请求完毕、数据即将写入 Pinia 的前一瞬间记录物理锚点，
+    // 杜绝网络等待期间因用户手滑产生的反向拉扯卡顿
+    const loaded = await store.loadMore((data) => {
+      if (data && data.length) {
+        anchor = findTopVisibleBubble();
+      }
+    });
+
+    if (!loaded || !anchor || !feedRef.value) return;
+
+    await nextTick();
+
+    // 重新测量该气泡元素在 DOM 插入后的新坐标
+    let targetEl = anchor.el && anchor.el.isConnected ? anchor.el : null;
+    if (!targetEl && anchor.key) {
+      const itemEl = feedRef.value.querySelector(`[data-group-key="${CSS.escape(anchor.key)}"]`);
+      if (itemEl) targetEl = itemEl.querySelector('.bubble');
+    }
+
+    if (targetEl) {
+      const containerRect = feedRef.value.getBoundingClientRect();
+      const currentRect = targetEl.getBoundingClientRect();
+      const currentTop = currentRect.top - containerRect.top;
+      const diff = currentTop - anchor.topOffset;
+      // 浏览器 overflow-anchor: auto 会在 C++ 引擎层自动精准锚定；
+      // 仅当浏览器未锚定（diff 明显超出正常滚动微动范围，如 >= 15px）时才由 JS 兜底对齐，
+      // 绝不微调打断用户的自然滚轮惯性，彻底消除卡顿与闪烁。
+      if (Math.abs(diff) >= 15) {
+        feedRef.value.scrollTop += diff;
+      }
+    }
+  } finally {
+    setTimeout(() => {
+      isRestoringScroll = false;
+    }, 100);
+  }
 }
 
 function openViewer(items, index) {
@@ -220,10 +253,34 @@ function onViewerDelete(item) {
   onDelete({ group: false, id: item.id });
 }
 
+watch(feedListRef, (newListEl, oldListEl) => {
+  if (resizeObserver && oldListEl) {
+    resizeObserver.unobserve(oldListEl);
+  }
+  if (newListEl && typeof ResizeObserver !== 'undefined') {
+    if (!resizeObserver) {
+      resizeObserver = new ResizeObserver(() => {
+        if (isAtBottom && !isRestoringScroll) {
+          scrollToBottom();
+        }
+      });
+    }
+    resizeObserver.observe(newListEl);
+  }
+});
+
 onMounted(async () => {
+  isAtBottom = true;
   await store.refresh();
   await nextTick();
   scrollToBottom();
+});
+
+onUnmounted(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
 });
 </script>
 

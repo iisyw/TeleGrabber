@@ -15,7 +15,7 @@ from .handlers import (
     handle_unsupported,
 )
 from .callbacks import handle_callback_query
-from .media_group import load_media_groups_collection
+from .media_group import load_media_groups_collection, start_pending_media_groups
 from .errors import error_handler
 
 __all__ = [
@@ -32,5 +32,6 @@ __all__ = [
     "handle_unsupported",
     "handle_callback_query",
     "load_media_groups_collection",
+    "start_pending_media_groups",
     "error_handler",
 ]
