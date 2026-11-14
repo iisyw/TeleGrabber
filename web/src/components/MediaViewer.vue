@@ -25,7 +25,6 @@
                 autoplay
                 preload="metadata"
                 :src="mediaUrl(current)"
-                @loadedmetadata="applyVideoProgress"
                 @timeupdate="onTimeUpdate"
                 @error="onVideoError"
               />
@@ -242,9 +241,6 @@ watch(
     showExtra.value = false;
     videoError.value = false;
     decodeWarning.value = false;
-    nextTick(() => {
-      if (videoEl.value) applyVideoProgress();
-    });
   },
 );
 
@@ -343,30 +339,7 @@ function next() {
   if (props.index < props.items.length - 1) emit('update:index', props.index + 1);
 }
 
-function videoKey(item) {
-  return item ? `telegrabber-video-pos:${item.file_unique_id || item.id}` : '';
-}
-
-function applyVideoProgress() {
-  const video = videoEl.value;
-  const item = current.value;
-  if (!video || !item || item.media_type !== 'video') return;
-  const saved = Number(localStorage.getItem(videoKey(item)) || 0);
-  if (saved > 0 && Number.isFinite(saved) && saved < (video.duration || Infinity)) {
-    video.currentTime = saved;
-  }
-}
-
-function saveVideoProgress() {
-  const video = videoEl.value;
-  const item = current.value;
-  if (!video || !item || item.media_type !== 'video') return;
-  if (!video.currentTime || video.currentTime < 3) return;
-  localStorage.setItem(videoKey(item), String(video.currentTime));
-}
-
 function onTimeUpdate() {
-  saveVideoProgress();
   if (!decodeWarning.value) {
     const video = videoEl.value;
     if (video && video.currentTime > 0.5 && !video.paused) {

@@ -43,12 +43,6 @@ def get_sources(source_type: Optional[str] = None):
         )
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        failed_rows = cursor.execute(
-            "SELECT source_name, COUNT(*) FROM download_tasks "
-            "WHERE status = 'failed' AND source_name IS NOT NULL AND source_name != '' "
-            "GROUP BY source_name"
-        ).fetchall()
-        failed_map = {row[0]: row[1] for row in failed_rows}
 
         total_query = (
             "SELECT COUNT(*), COUNT(DISTINCT CASE "
@@ -74,7 +68,6 @@ def get_sources(source_type: Optional[str] = None):
                     "remark": row[7] or '',
                     "source_id": row[8],
                     "protected": user_api.is_chat_protected(row[8]),
-                    "failed_count": failed_map.get(row[0], 0),
                 }
                 for row in rows
             ],

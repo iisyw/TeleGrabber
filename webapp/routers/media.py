@@ -300,29 +300,17 @@ def update_media_meta(media_id: int, payload: MediaMetaUpdate):
 
 @router.get("/api/duplicates")
 def get_duplicates(limit: int = Query(50, ge=1, le=200)):
-    """获取系统拦截跳过的重复下载记录。"""
+    """获取媒体库中的重复项。"""
     conn = get_db_connection()
     try:
-        # 查询在任务中心中被拦截跳过的重复下载任务
         rows = conn.execute(
-            "SELECT file_unique_id, COUNT(*) AS cnt, COALESCE(MAX(total_bytes), 0), "
-            "GROUP_CONCAT(COALESCE(filename, ''), char(31)), "
-            "GROUP_CONCAT(COALESCE(source_name, ''), char(31)) "
-            "FROM download_tasks WHERE status = 'skipped' AND file_unique_id IS NOT NULL AND file_unique_id != '' "
-            "GROUP BY file_unique_id "
-            "ORDER BY cnt DESC, MAX(updated_at) DESC LIMIT ?",
+            "SELECT file_unique_id, COUNT(*) AS cnt, COALESCE(SUM(file_size), 0), "
+            "GROUP_CONCAT(filename, char(31)), GROUP_CONCAT(COALESCE(source_name, ''), char(31)) "
+            "FROM media_metadata WHERE file_unique_id IS NOT NULL AND file_unique_id != '' "
+            "GROUP BY file_unique_id HAVING COUNT(*) > 1 "
+            "ORDER BY cnt DESC, file_unique_id LIMIT ?",
             (limit,),
         ).fetchall()
-        # 若暂无 skipped 任务，兜底查询历史媒体库中的重复项
-        if not rows:
-            rows = conn.execute(
-                "SELECT file_unique_id, COUNT(*) AS cnt, COALESCE(SUM(file_size), 0), "
-                "GROUP_CONCAT(filename, char(31)), GROUP_CONCAT(COALESCE(source_name, ''), char(31)) "
-                "FROM media_metadata WHERE file_unique_id IS NOT NULL AND file_unique_id != '' "
-                "GROUP BY file_unique_id HAVING COUNT(*) > 1 "
-                "ORDER BY cnt DESC, file_unique_id LIMIT ?",
-                (limit,),
-            ).fetchall()
     finally:
         conn.close()
 

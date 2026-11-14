@@ -26,13 +26,11 @@ from bot.media_group import (
 from bot.download import (
     LARGE_FILE_THRESHOLD, MEDIA_LABELS,
     DOWNLOAD_METHOD_USER, DOWNLOAD_METHOD_BOT,
-    _safe_create_task, build_retry_context,
     reply_duplicate, download_large_via_user_api, save_small_file,
     build_single_record, _single_buttons,
     get_media_label, build_download_filename, save_media_metadata,
     save_telegram_thumbnail,
 )
-from core import task_manager
 from core import user_api
 
 
@@ -317,35 +315,6 @@ async def _process_link(update, context, args):
     final_path = os.path.join(date_dir, final_filename)
     file_size = media_info.get('file_size', 0) or 0
     size_str = f"{file_size/1024/1024:.1f}MB" if file_size >= 1024*1024 else f"{file_size/1024:.1f}KB"
-    task_id = _safe_create_task(
-        user_id=update.effective_user.id,
-        user_name=update.effective_user.username or update.effective_user.first_name,
-        chat_id=update.effective_chat.id,
-        message_id=update.message.message_id,
-        media_group_id=media_info.get('media_group_id') or '',
-        file_unique_id=media_info['file_unique_id'],
-        filename=final_filename,
-        media_type=media_info['media_type'],
-        source_name=media_info.get('source_name'),
-        source_type=media_info.get('source_type'),
-        download_method='user_api',
-        total_bytes=file_size,
-        retry_context=build_retry_context(
-            record, media_info['media_type'], date_dir, record,
-            chat_id=update.effective_chat.id,
-            chat_type=update.effective_chat.type,
-            message_id=update.message.message_id,
-            current_message_id=update.message.message_id,
-            original_message_id=media_info['message_id'],
-            message_time=media_info.get('message_date'),
-            user_id=update.effective_user.id,
-            user_name=update.effective_user.username or update.effective_user.first_name,
-            media_group_id=media_info.get('media_group_id') or '',
-            bot_username=context.bot.username,
-            link_chat_id=chat_id,
-            link_message_id=media_info['message_id'],
-        ),
-    )
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
         message_id=status_message.message_id,
@@ -363,8 +332,6 @@ async def _process_link(update, context, args):
     progress_state = {"last_time": 0.0, "last_percent": -1}
 
     def progress(current, total_size):
-        if task_id:
-            task_manager.update_progress(task_id, current, total_size)
         percent = int(current * 100 / total_size) if total_size else 0
         now = time.time()
         # 节流：百分比变化且至少间隔 2 秒才更新，100% 强制更新，避免触发 Telegram 限流
@@ -429,14 +396,6 @@ async def _process_link(update, context, args):
             error_msg = "元数据保存失败"
 
     has_failed = not (success and db_success)
-    if task_id:
-        if not has_failed:
-            task_manager.finish_task(task_id, 'success', filename=final_filename)
-        else:
-            task_manager.finish_task(
-                task_id, 'failed',
-                error=error_msg or "User API 下载失败",
-            )
     result_text = (
         f"📋 检测到资源\n"
         f"类型: {label}\n"
@@ -539,24 +498,6 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
         record = build_single_record(media_obj, media_type, date_dir, source_info, ext_for_large, chat, message)
         record['is_dup'] = True
         state.put_single_record(single_key, record)
-        try:
-            tid = _safe_create_task(
-                user_id=update.effective_user.id if update.effective_user else None,
-                user_name=(update.effective_user.username or update.effective_user.first_name) if update.effective_user else None,
-                chat_id=chat.id,
-                message_id=message.message_id,
-                media_group_id='',
-                file_unique_id=media_obj.file_unique_id,
-                filename=record.get('final_filename'),
-                media_type=media_type,
-                source_name=source_info.get('source_name'),
-                source_type=source_info.get('source_type'),
-                download_method=DOWNLOAD_METHOD_BOT,
-                total_bytes=getattr(media_obj, 'file_size', 0) or 0,
-            )
-            task_manager.update_task(tid, status='skipped', error='检测到重复文件已跳过')
-        except Exception as te:
-            logger.warning(f"记录单文件跳过任务失败: {te}")
         await update.message.reply_text(
             dup_text, parse_mode='Markdown', disable_web_page_preview=True,
             reply_to_message_id=message.message_id,

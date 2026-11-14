@@ -26,6 +26,7 @@
   background: var(--bubble-bg);
   box-shadow: var(--bubble-shadow);
   transition: background var(--transition);
+  overflow: hidden;
 
   &:hover {
     background: var(--bubble-hover);

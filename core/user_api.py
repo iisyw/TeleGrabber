@@ -8,7 +8,7 @@ from pyrogram.errors import (
 )
 from .config import (
     API_ID, API_HASH, PROXY, logger, DOWNLOAD_RETRIES, DATA_DIR,
-    DOWNLOAD_TIMEOUT, DOWNLOAD_STALL_TIMEOUT, TASK_MIN_FREE_MB,
+    DOWNLOAD_TIMEOUT, DOWNLOAD_STALL_TIMEOUT, MIN_FREE_MB,
     USER_API_ENABLED,
 )
 import os
@@ -368,7 +368,7 @@ def _is_permanent_download_error(exc):
 async def _download_media_with_limits(client, target, final_path, progress_callback=None, expected_size=0):
     """下载到 .part，校验完整性后原子改名；同时做总超时和“无进度”卡死检测。"""
     free = shutil.disk_usage(os.path.dirname(os.path.abspath(final_path))).free
-    required = int((expected_size or 0) * 1.05) + TASK_MIN_FREE_MB * 1024 * 1024
+    required = int((expected_size or 0) * 1.05) + MIN_FREE_MB * 1024 * 1024
     if free < required:
         raise OSError(
             f"磁盘空间不足：需要约 {required // (1024 * 1024)}MB，"

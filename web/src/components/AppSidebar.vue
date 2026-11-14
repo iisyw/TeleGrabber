@@ -23,22 +23,6 @@
       </router-link>
 
       <router-link
-        to="/tasks"
-        class="app-sidebar-item"
-        :class="{ active: $route.path === '/tasks' }"
-        title="下载任务"
-      >
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 3v12" />
-          <path d="m7 10 5 5 5-5" />
-          <path d="M5 21h14" />
-        </svg>
-        <span>下载任务</span>
-        <span v-if="failedCount" class="app-sidebar-badge">{{ failedCount > 99 ? '99+' : failedCount }}</span>
-        <span v-else-if="downloadingCount" class="app-sidebar-dot" />
-      </router-link>
-
-      <router-link
         to="/storage"
         class="app-sidebar-item"
         :class="{ active: $route.path === '/storage' }"
@@ -104,33 +88,7 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { theme, toggleTheme } from '@/lib/theme';
-import { fetchTasks } from '@/api/tasks';
-
-const failedCount = ref(0);
-const downloadingCount = ref(0);
-let timer = null;
-
-async function loadTaskCounts() {
-  try {
-    const data = await fetchTasks({ limit: 1 }, { silent: true });
-    const counts = (data && data.counts) || {};
-    failedCount.value = counts.failed || 0;
-    downloadingCount.value = (counts.downloading || 0) + (counts.queued || 0);
-  } catch {
-    // 状态轮询失败不打扰用户
-  }
-}
-
-onMounted(() => {
-  loadTaskCounts();
-  timer = setInterval(loadTaskCounts, 15000);
-});
-
-onBeforeUnmount(() => {
-  if (timer) clearInterval(timer);
-});
 </script>
 
 <style scoped lang="scss" src="./AppSidebar.scss"></style>

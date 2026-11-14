@@ -43,26 +43,12 @@
           </div>
           <div class="source-sub">
             {{ item.messages }} 个消息, {{ item.media }} 个媒体
-            <span v-if="item.failedCount" class="source-failed" :title="`${item.failedCount} 个失败下载任务`">
-              · 失败 {{ item.failedCount }}
-            </span>
             <span v-if="item.lastSynced" :title="`最近同步 ${formatTime(item.lastSynced)}`">
               · {{ formatTime(item.lastSynced).slice(5, 10) }}
             </span>
           </div>
         </div>
         <div v-if="item.value" class="source-actions" @click.stop>
-          <button
-            v-if="item.failedCount"
-            type="button"
-            class="source-action danger"
-            title="重试该来源的失败任务"
-            @click="retryFailed(item)"
-          >
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19" />
-            </svg>
-          </button>
           <button
             type="button"
             class="source-action"
@@ -119,7 +105,6 @@
 import { computed, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { useMediaStore } from '@/store/media';
-import { retryFailedTasks } from '@/api/tasks';
 import { sourceTypeLabel, formatTime } from '@/lib/media';
 
 const store = useMediaStore();
@@ -173,7 +158,6 @@ const sourceItems = computed(() => {
       remark: source.remark || '',
       lastSynced: source.last_synced_at || '',
       protected: Boolean(source.protected),
-      failedCount: source.failed_count || 0,
       messages: count.messages,
       media: count.media,
     });
@@ -196,17 +180,6 @@ async function toggleHide(item) {
     if (!item.hidden && store.currentSourceName === item.value) {
       emit('select-source', '');
     }
-  } catch {
-    // 错误由 request.js 统一提示
-  }
-}
-
-async function retryFailed(item) {
-  try {
-    const res = await retryFailedTasks(20, item.value);
-    const started = (res && res.data && res.data.started) || [];
-    ElMessage.success(`已加入 ${started.length} 个重试任务`);
-    await store.loadSources();
   } catch {
     // 错误由 request.js 统一提示
   }

@@ -62,7 +62,6 @@ if os.path.exists(CONFIG_PATH):
 _telegram = _config["telegram"]
 _storage = _config["storage"]
 _web = _config["web"]
-_tasks = _config["tasks"]
 _audit = _config["audit"]
 
 # Telegram 机器人配置
@@ -72,6 +71,7 @@ BOT_ID = int(TOKEN.split(':')[0]) if TOKEN and ':' in TOKEN else None
 # 存储目录
 SAVE_DIR = _storage["save_dir"]
 DATA_DIR = _storage["data_dir"]
+MIN_FREE_MB = _storage["min_free_mb"]
 
 # 连接与下载
 PROXY = _telegram["proxy_url"] or None
@@ -83,11 +83,6 @@ DOWNLOAD_STALL_TIMEOUT = _telegram["download_stall_timeout"]
 # Web 管理后台
 WEB_HOST = _web["host"]
 WEB_PORT = _web["port"]
-
-# 任务中心
-TASK_RETAIN_DAYS = _tasks["retain_days"]
-TASK_RETRY_CONCURRENCY = _tasks["retry_concurrency"]
-TASK_MIN_FREE_MB = _tasks["min_free_mb"]
 
 # 用户访问限制
 ALLOWED_USERS = _telegram["allowed_users"]

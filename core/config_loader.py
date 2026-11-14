@@ -33,15 +33,11 @@ DEFAULTS: dict[str, Any] = {
     "storage": {
         "save_dir": "downloads",
         "data_dir": "data",
+        "min_free_mb": 512,
     },
     "web": {
         "host": "127.0.0.1",
         "port": 5005,
-    },
-    "tasks": {
-        "retain_days": 30,
-        "retry_concurrency": 2,
-        "min_free_mb": 512,
     },
     "audit": {
         "enabled": False,
@@ -91,10 +87,9 @@ def load_config(path: str) -> dict[str, Any]:
     telegram = config["telegram"]
     storage = config["storage"]
     web = config["web"]
-    tasks = config["tasks"]
     audit = config["audit"]
 
-    for section, name in ((telegram, "telegram"), (storage, "storage"), (web, "web"), (tasks, "tasks"), (audit, "audit")):
+    for section, name in ((telegram, "telegram"), (storage, "storage"), (web, "web"), (audit, "audit")):
         if not isinstance(section, dict):
             raise ConfigError(f"[{name}] 必须是配置节")
 
@@ -108,11 +103,9 @@ def load_config(path: str) -> dict[str, Any]:
     _require_type(telegram["download_stall_timeout"], int, "telegram.download_stall_timeout")
     _require_type(storage["save_dir"], str, "storage.save_dir")
     _require_type(storage["data_dir"], str, "storage.data_dir")
+    _require_type(storage["min_free_mb"], int, "storage.min_free_mb")
     _require_type(web["host"], str, "web.host")
     _require_type(web["port"], int, "web.port")
-    _require_type(tasks["retain_days"], int, "tasks.retain_days")
-    _require_type(tasks["retry_concurrency"], int, "tasks.retry_concurrency")
-    _require_type(tasks["min_free_mb"], int, "tasks.min_free_mb")
     _require_type(audit["enabled"], bool, "audit.enabled")
 
     if telegram["connection_timeout"] <= 0:
@@ -127,12 +120,8 @@ def load_config(path: str) -> dict[str, Any]:
         raise ConfigError("web.port 必须在 1-65535 之间")
     if not web["host"].strip():
         raise ConfigError("web.host 不能为空；本机使用可填写 127.0.0.1")
-    if tasks["retain_days"] < 0:
-        raise ConfigError("tasks.retain_days 不能为负数")
-    if not (1 <= tasks["retry_concurrency"] <= 10):
-        raise ConfigError("tasks.retry_concurrency 必须在 1-10 之间")
-    if tasks["min_free_mb"] < 0:
-        raise ConfigError("tasks.min_free_mb 不能为负数")
+    if storage["min_free_mb"] < 0:
+        raise ConfigError("storage.min_free_mb 不能为负数")
 
     telegram["allowed_users"] = _string_list(
         telegram["allowed_users"], "telegram.allowed_users"

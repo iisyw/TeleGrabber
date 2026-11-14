@@ -13,11 +13,10 @@ import telegram.error
 
 from core.config import (
     TOKEN, logger, get_connection_args, USER_API_ENABLED,
-    WEB_HOST, WEB_PORT, TASK_RETAIN_DAYS,
+    WEB_HOST, WEB_PORT,
 )
 import bot
 from core.utils import init_db
-from core.task_manager import fail_stale_tasks, prune_tasks, start_task_prune_scheduler
 from core import user_api
 from core import runtime_state
 from webapp.app import run_server
@@ -150,9 +149,6 @@ def main() -> None:
 
     # 初始化数据库与媒体组状态
     init_db()
-    fail_stale_tasks()
-    prune_tasks(TASK_RETAIN_DAYS)
-    start_task_prune_scheduler(TASK_RETAIN_DAYS)
     bot.load_media_groups_collection()
 
     # 预启动 User API (MTProto)；放后台线程，避免首次登录阻塞

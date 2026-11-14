@@ -78,31 +78,6 @@
   }
 }
 
-.app-sidebar-badge {
-  position: absolute;
-  top: 2px;
-  right: 6px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--danger);
-  color: #fff;
-  font-size: 9px;
-  line-height: 16px;
-  text-align: center;
-}
-
-.app-sidebar-dot {
-  position: absolute;
-  top: 6px;
-  right: 9px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
 @media (max-width: 720px) {
   .app-sidebar {
     width: 56px;

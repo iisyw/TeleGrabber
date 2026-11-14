@@ -27,10 +27,6 @@
           <span class="welcome-feature-desc">按来源浏览、搜索和预览已归档媒体</span>
         </div>
         <div class="welcome-feature">
-          <span class="welcome-feature-title">下载任务</span>
-          <span class="welcome-feature-desc">查看进度、失败原因，并重试或暂停任务</span>
-        </div>
-        <div class="welcome-feature">
           <span class="welcome-feature-title">存储管理</span>
           <span class="welcome-feature-desc">查看各来源占用、重复媒体与磁盘空间</span>
         </div>
@@ -42,7 +38,6 @@
 
       <div class="welcome-actions">
         <router-link to="/feed" class="welcome-enter">进入消息流</router-link>
-        <router-link to="/tasks" class="welcome-link">下载任务</router-link>
         <router-link to="/storage" class="welcome-link">存储管理</router-link>
         <router-link to="/status" class="welcome-link">系统状态</router-link>
       </div>

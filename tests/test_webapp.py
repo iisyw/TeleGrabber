@@ -13,8 +13,6 @@ if FASTAPI_AVAILABLE:
     from webapp.app import app as webapp_app  # noqa: F401  (确保 app 可正常组装)
     from webapp.routers import media as media_api
     from webapp.routers import sources as sources_api
-    from webapp.routers import tasks as tasks_api
-    from core import task_manager
 else:
     sources_api = None
 
@@ -70,73 +68,11 @@ class WebAppTestCase(unittest.TestCase):
             media_api.delete_media_group("   ")
         self.assertEqual(ctx2.exception.code, VALIDATION_FAILED)
 
-    def test_tasks_filter_by_batch_id(self):
-        task_manager.create_task(
-            file_unique_id="f1",
-            batch_id="batch-100",
-            source_name="chan",
-        )
-        task_manager.create_task(
-            file_unique_id="f2",
-            batch_id="batch-200",
-            source_name="chan",
-        )
-
-        res_100 = tasks_api.get_tasks(limit=50, offset=0, batch_id="batch-100")
-        self.assertEqual(res_100["code"], 10000)
-        self.assertEqual(len(res_100["data"]["tasks"]), 1)
-        self.assertEqual(res_100["data"]["tasks"][0]["file_unique_id"], "f1")
-
-        res_200 = tasks_api.get_tasks(limit=50, offset=0, batch_id="batch-200")
-        self.assertEqual(res_200["code"], 10000)
-        self.assertEqual(len(res_200["data"]["tasks"]), 1)
-        self.assertEqual(res_200["data"]["tasks"][0]["file_unique_id"], "f2")
-
-    def test_tasks_queued_and_counts(self):
-        t1 = task_manager.create_task(
-            file_unique_id="queued-f1",
-            batch_id="batch-q",
-            source_name="chan-q",
-        )
-        t2 = task_manager.create_task(
-            file_unique_id="queued-f2",
-            batch_id="batch-q",
-            source_name="chan-q",
-        )
-        res = tasks_api.get_tasks(limit=50, offset=0)
-        self.assertEqual(res["code"], 10000)
-        self.assertEqual(res["data"]["counts"].get("queued"), 2)
-
-        res_q = tasks_api.get_tasks(status="queued", limit=50, offset=0)
-        self.assertEqual(res_q["code"], 10000)
-        self.assertEqual(len(res_q["data"]["tasks"]), 2)
-
-    def test_duplicates_returns_skipped_tasks(self):
-        tid = task_manager.create_task(
-            file_unique_id="dup-unique-1",
-            filename="dup_image.jpg",
-            source_name="chan-dup",
-            total_bytes=1048576,
-        )
-        task_manager.update_task(tid, status="skipped", error="检测到重复文件已跳过")
-
+    def test_duplicates_returns_empty_when_no_duplicates(self):
+        self._save("unique-1", "channel-a", "channel")
         res = media_api.get_duplicates(limit=50)
         self.assertEqual(res["code"], 10000)
-        data = res["data"]
-        self.assertTrue(any(item["file_unique_id"] == "dup-unique-1" for item in data))
-        dup_entry = next(item for item in data if item["file_unique_id"] == "dup-unique-1")
-        self.assertEqual(dup_entry["count"], 1)
-        self.assertEqual(dup_entry["total_bytes"], 1048576)
-        self.assertIn("dup_image.jpg", dup_entry["filenames"])
-        self.assertIn("chan-dup", dup_entry["sources"])
-
-    def test_task_prune_scheduler_lifecycle(self):
-        task_manager.start_task_prune_scheduler(retain_days=30, interval_seconds=3600)
-        self.assertIsNotNone(task_manager._prune_thread)
-        self.assertTrue(task_manager._prune_thread.is_alive())
-        task_manager.stop_task_prune_scheduler()
-        task_manager._prune_thread.join(timeout=1)
-        self.assertFalse(task_manager._prune_thread.is_alive())
+        self.assertEqual(res["data"], [])
 
     def test_media_range_requests(self):
         from fastapi.testclient import TestClient
@@ -172,6 +108,61 @@ class WebAppTestCase(unittest.TestCase):
             error_payload(RESOURCE_NOT_FOUND, "没有记录"),
             {"code": RESOURCE_NOT_FOUND, "msg": "没有记录", "requestId": "rid-123"},
         )
+
+    def test_health_cache_lifecycle_and_persistence(self):
+        from webapp import health as health_service
+
+        health_cache_file = os.path.join(self.temp_dir.name, "health_cache.json")
+        with patch.object(health_service, "HEALTH_FILE", health_cache_file), \
+             patch.object(health_service, "SAVE_DIR", self.temp_dir.name):
+            snap = health_service.snapshot(force=True)
+            self.assertIn("checked_at", snap)
+            self.assertTrue(os.path.exists(health_cache_file))
+
+            cached = health_service.cached()
+            self.assertEqual(cached["checked_at"], snap["checked_at"])
+
+    def test_health_issues_and_repair_and_clean(self):
+        from webapp import health as health_service
+        from fastapi.testclient import TestClient
+        client = TestClient(webapp_app)
+
+        health_cache_file = os.path.join(self.temp_dir.name, "health_cache.json")
+        with patch.object(health_service, "HEALTH_FILE", health_cache_file), \
+             patch.object(health_service, "SAVE_DIR", self.temp_dir.name):
+
+            # 1. 保存一条记录，物理文件存在于 SAVE_DIR
+            self._save("health-ok", "chan", "channel")
+            chan_dir = os.path.join(self.temp_dir.name, "chan")
+            os.makedirs(chan_dir, exist_ok=True)
+            file_path = os.path.join(chan_dir, "health-ok.jpg")
+            with open(file_path, "wb") as f:
+                f.write(b"fake image data")
+
+            # 2. 保存另一条记录，但物理文件不存在
+            self._save("health-missing", "chan", "channel")
+
+            # 查询 issues
+            res = client.get("/api/status/health/issues?type=all")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()["data"]
+            self.assertGreaterEqual(data["total"], 1)
+
+            # 查询 missing_files
+            res_mf = client.get("/api/status/health/issues?type=missing_files")
+            self.assertEqual(res_mf.status_code, 200)
+            items_mf = res_mf.json()["data"]["items"]
+            self.assertTrue(any(it["file_unique_id"] == "health-missing" for it in items_mf))
+
+            # 修复接口
+            res_repair = client.post("/api/status/health/repair", json={"action": "all"})
+            self.assertEqual(res_repair.status_code, 200)
+            self.assertIn("repaired_thumbs", res_repair.json()["data"])
+
+            # 清理缺失文件记录
+            res_clean = client.post("/api/status/health/clean-missing", json={})
+            self.assertEqual(res_clean.status_code, 200)
+            self.assertGreaterEqual(res_clean.json()["data"]["deleted_count"], 1)
 
 
 if __name__ == "__main__":

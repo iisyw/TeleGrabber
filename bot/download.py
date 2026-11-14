@@ -12,7 +12,6 @@ import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core.config import logger, DOWNLOAD_TIMEOUT
-from core import task_manager
 from core.media_files import (
     generate_temp_filename, get_image_extension,
     get_video_extension,
@@ -170,7 +169,7 @@ async def reply_duplicate(update, media_obj, media_type, caption):
     return reply_msg
 
 
-def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix, header=None, task_id=None):
+def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix, header=None):
     """生成下载进度回调 (Pyrogram 签名: current, total)。
 
     回调在 Pyrogram 的事件循环线程里被调用，这里通过 run_coroutine_threadsafe
@@ -191,8 +190,6 @@ def _make_progress_callback(bot, loop, chat_id, status_message_id, prefix, heade
             return
         st["last_time"] = now
         st["last_percent"] = percent
-        if task_id:
-            task_manager.update_progress(task_id, current, total)
         # 100% 由主流程最终结果统一发送完成提示，避免并发编辑触发 Telegram 限流
         if percent >= 100:
             return
@@ -224,59 +221,6 @@ def _stub_user(record):
         'username': record.get('user_name'),
         'first_name': record.get('user_name'),
     })
-
-
-def _safe_create_task(**kwargs):
-    """任务中心失败不能影响实际下载。"""
-    try:
-        task_id = task_manager.create_task(**kwargs)
-        task_manager.update_task(task_id, status='downloading')
-        return task_id
-    except Exception as e:
-        logger.warning(f"创建下载任务失败: {e}")
-        return None
-
-
-def build_retry_context(media_info, media_type, date_dir, source_info,
-                        chat_id=None, chat_type=None, message_id=None,
-                        current_message_id=None, original_message_id=None,
-                        message_time=None, user_id=None, user_name=None,
-                        media_group_id=None, item_index=None,
-                        base_timestamp=None, bot_username=None,
-                        link_chat_id=None, link_message_id=None):
-    """构造可供 Web 任务中心重试的完整上下文。"""
-    return {
-        'file_id': media_info.get('file_id'),
-        'file_unique_id': media_info.get('file_unique_id'),
-        'thumb_file_id': media_info.get('thumb_file_id'),
-        'media_type': media_type,
-        'date_dir': date_dir,
-        'caption': media_info.get('caption'),
-        'source_name': source_info.get('source_name'),
-        'source_id': source_info.get('source_id'),
-        'source_link1': source_info.get('source_link1'),
-        'source_username': source_info.get('source_username'),
-        'source_type': source_info.get('source_type'),
-        'orig_chat_id': source_info.get('orig_chat_id'),
-        'orig_msg_id': source_info.get('orig_msg_id'),
-        'link_chat_id': link_chat_id,
-        'link_message_id': link_message_id,
-        'chat_id': chat_id,
-        'chat_type': chat_type,
-        'message_id': message_id,
-        'current_message_id': current_message_id or message_id,
-        'original_message_id': original_message_id or message_id,
-        'message_time': message_time,
-        'user_id': user_id,
-        'user_name': user_name,
-        'file_size': media_info.get('file_size') or 0,
-        'width': media_info.get('width'),
-        'height': media_info.get('height'),
-        'media_group_id': media_group_id or '',
-        'item_index': item_index,
-        'base_timestamp': base_timestamp,
-        'bot_username': bot_username,
-    }
 
 
 async def save_telegram_thumbnail(bot, media_obj, file_unique_id):
@@ -330,42 +274,10 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
         final_filename = f"{generate_temp_filename()}{record['ext_for_large']}"
     final_path = os.path.join(date_dir, final_filename)
 
-    retry_context = build_retry_context(
-        record, media_type, date_dir, record,
-        chat_id=record.get('chat_id'), chat_type=record.get('chat_type'),
-        message_id=record.get('message_id'),
-        current_message_id=record.get('current_message_id'),
-        original_message_id=record.get('original_message_id'),
-        message_time=record.get('message_time'),
-        user_id=record.get('user_id'), user_name=record.get('user_name'),
-        media_group_id=record.get('media_group_id'),
-        item_index=record.get('item_index'),
-        base_timestamp=record.get('base_timestamp'),
-    )
-
-    task_id = _safe_create_task(
-        user_id=record.get('user_id'),
-        user_name=record.get('user_name'),
-        chat_id=record.get('chat_id'),
-        message_id=record.get('message_id') or record.get('current_message_id'),
-        media_group_id=record.get('media_group_id'),
-        file_unique_id=record.get('file_unique_id'),
-        filename=final_filename,
-        media_type=media_type,
-        source_name=record.get('source_name'),
-        source_type=record.get('source_type'),
-        download_method='user_api',
-        total_bytes=record.get('file_size', 0),
-        item_index=record.get('item_index'),
-        retry_context=retry_context,
-    )
-    task_manager.update_task(task_id, status='downloading')
-
     progress = _make_progress_callback(
         bot, loop, status_chat_id, status_message_id,
         prefix=f"⏳ 正在通过 User API 下载大{label}...",
         header=header,
-        task_id=task_id,
     )
 
     link_chat_id = record.get('link_chat_id')
@@ -412,7 +324,6 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
             ),
         )
     if not success:
-        task_manager.finish_task(task_id, 'failed', error='User API 下载失败')
         return None
 
     media_obj_stub = type('Media', (), {'file_id': record['file_id'], 'file_unique_id': file_unique_id})
@@ -437,10 +348,8 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
             os.remove(final_path)
         except OSError:
             pass
-        task_manager.finish_task(task_id, 'failed', error='元数据保存失败')
         return None
     record['final_filename'] = final_filename
-    task_manager.finish_task(task_id, 'success', filename=final_filename)
     if media_type != 'photo':
         await save_telegram_thumbnail_by_id(bot, record.get('thumb_file_id'), file_unique_id)
     return final_filename
@@ -480,33 +389,6 @@ async def download_small_from_record(bot, record):
     temp_filename = generate_temp_filename()
     temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
 
-    task_id = _safe_create_task(
-        user_id=record.get('user_id'),
-        user_name=record.get('user_name'),
-        chat_id=record.get('chat_id'),
-        message_id=record.get('message_id') or record.get('current_message_id'),
-        media_group_id=record.get('media_group_id'),
-        file_unique_id=record.get('file_unique_id'),
-        media_type=media_type,
-        source_name=record.get('source_name'),
-        source_type=record.get('source_type'),
-        download_method='bot',
-        total_bytes=record.get('file_size', 0),
-        item_index=record.get('item_index'),
-        retry_context=build_retry_context(
-            record, media_type, date_dir, record,
-            chat_id=record.get('chat_id'), chat_type=record.get('chat_type'),
-            message_id=record.get('message_id'),
-            current_message_id=record.get('current_message_id'),
-            original_message_id=record.get('original_message_id'),
-            message_time=record.get('message_time'),
-            user_id=record.get('user_id'), user_name=record.get('user_name'),
-            media_group_id=record.get('media_group_id'),
-            item_index=record.get('item_index'),
-            base_timestamp=record.get('base_timestamp'),
-        ),
-    )
-    task_manager.update_task(task_id, status='downloading')
     try:
         await download_tg_file_with_retry(record['file_id'], temp_path, bot=bot, timeout=DOWNLOAD_TIMEOUT)
 
@@ -544,15 +426,12 @@ async def download_small_from_record(bot, record):
         )
         if not db_success:
             os.remove(final_path)
-            task_manager.finish_task(task_id, 'failed', error='元数据保存失败')
             return None
         record['final_filename'] = final_filename
-        task_manager.finish_task(task_id, 'success', filename=final_filename)
         if media_type != 'photo':
             await save_telegram_thumbnail_by_id(bot, record.get('thumb_file_id'), record['file_unique_id'])
         return final_filename
     except Exception as e:
-        task_manager.finish_task(task_id, 'failed', error=str(e))
         for path in (temp_path, temp_path + ".temp"):
             if os.path.exists(path):
                 try:
@@ -579,48 +458,10 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
     label = MEDIA_LABELS.get(media_type, '文件')
     loop = asyncio.get_running_loop()
 
-    task_id = _safe_create_task(
-        user_id=update.effective_user.id if update.effective_user else None,
-        user_name=(update.effective_user.username or update.effective_user.first_name) if update.effective_user else None,
-        chat_id=chat.id,
-        message_id=update.message.message_id,
-        media_group_id=getattr(update.message, 'media_group_id', None) or '',
-        file_unique_id=media_obj.file_unique_id,
-        filename=final_filename,
-        media_type=media_type,
-        source_name=source_info.get('source_name'),
-        source_type=source_info.get('source_type'),
-        download_method='user_api',
-        total_bytes=getattr(media_obj, 'file_size', 0),
-        retry_context=build_retry_context(
-            {
-                'file_id': media_obj.file_id,
-                'file_unique_id': media_obj.file_unique_id,
-                'thumb_file_id': getattr(getattr(media_obj, 'thumbnail', None), 'file_id', None),
-                'caption': update.message.caption,
-                'file_size': getattr(media_obj, 'file_size', 0),
-                'width': getattr(media_obj, 'width', None),
-                'height': getattr(media_obj, 'height', None),
-            },
-            media_type, date_dir, source_info,
-            chat_id=chat.id, chat_type=chat.type,
-            message_id=update.message.message_id,
-            current_message_id=update.message.message_id,
-            original_message_id=get_message_id(update.message),
-            message_time=message_time,
-            user_id=update.effective_user.id if update.effective_user else None,
-            user_name=(update.effective_user.username or update.effective_user.first_name) if update.effective_user else None,
-            media_group_id=getattr(update.message, 'media_group_id', None) or '',
-            bot_username=context.bot.username,
-        ),
-    )
-    task_manager.update_task(task_id, status='downloading')
-
     progress = _make_progress_callback(
         context.bot, loop, chat.id, status_message.message_id,
         prefix=f"⏳ 正在通过 User API 下载大{label}...",
         header=header,
-        task_id=task_id,
     ) if status_message else None
 
     # 溯源：优先用原始频道/消息 ID
@@ -654,7 +495,6 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
         )
 
     if not success:
-        task_manager.finish_task(task_id, 'failed', error='User API 下载失败')
         return None
 
     db_success = save_to_db(
@@ -675,9 +515,7 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
             os.remove(final_path)
         except OSError:
             pass
-        task_manager.finish_task(task_id, 'failed', error='元数据保存失败')
         return None
-    task_manager.finish_task(task_id, 'success', filename=final_filename)
     return final_filename
 
 
@@ -691,41 +529,6 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
 
     temp_filename = generate_temp_filename()
     temp_path = os.path.join(date_dir, f"{temp_filename}_temp")
-
-    task_id = _safe_create_task(
-        user_id=update.effective_user.id if update.effective_user else None,
-        user_name=(update.effective_user.username or update.effective_user.first_name) if update.effective_user else None,
-        chat_id=update.effective_chat.id,
-        message_id=update.message.message_id,
-        media_group_id=getattr(update.message, 'media_group_id', None) or '',
-        file_unique_id=media_obj.file_unique_id,
-        media_type=media_type,
-        source_name=source_info.get('source_name'),
-        source_type=source_info.get('source_type'),
-        download_method='bot',
-        total_bytes=getattr(media_obj, 'file_size', 0),
-        retry_context=build_retry_context(
-            {
-                'file_id': media_obj.file_id,
-                'file_unique_id': media_obj.file_unique_id,
-                'thumb_file_id': getattr(getattr(media_obj, 'thumbnail', None), 'file_id', None),
-                'caption': update.message.caption,
-                'file_size': getattr(media_obj, 'file_size', 0),
-                'width': getattr(media_obj, 'width', None),
-                'height': getattr(media_obj, 'height', None),
-            },
-            media_type, date_dir, source_info,
-            chat_id=update.effective_chat.id, chat_type=update.effective_chat.type,
-            message_id=update.message.message_id,
-            current_message_id=update.message.message_id,
-            original_message_id=get_message_id(update.message),
-            message_time=message_time,
-            user_id=update.effective_user.id if update.effective_user else None,
-            user_name=(update.effective_user.username or update.effective_user.first_name) if update.effective_user else None,
-            media_group_id=getattr(update.message, 'media_group_id', None) or '',
-        ),
-    )
-    task_manager.update_task(task_id, status='downloading')
 
     try:
         await download_tg_file_with_retry(media_obj, temp_path, timeout=DOWNLOAD_TIMEOUT)
@@ -750,13 +553,10 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
         )
         if not db_success:
             os.remove(final_path)
-            task_manager.finish_task(task_id, 'failed', error='元数据保存失败')
             return None
-        task_manager.finish_task(task_id, 'success', filename=final_filename)
         logger.info(f"已保存{MEDIA_LABELS.get(media_type, '文件')}: {final_path}")
         return final_filename
     except Exception as e:
-        task_manager.finish_task(task_id, 'failed', error=str(e))
         for path in (temp_path, temp_path + ".temp"):
             if os.path.exists(path):
                 try:

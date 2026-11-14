@@ -2,19 +2,19 @@
 
 import os
 import shutil
+from typing import List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
-from webapp.api_response import ok
+from webapp.api_response import BusinessError, VALIDATION_FAILED, ok
 from core.config import (
     ALLOWED_USERS, DATA_DIR, DOWNLOAD_RETRIES, DOWNLOAD_STALL_TIMEOUT,
-    DOWNLOAD_TIMEOUT, PROXY, SAVE_DIR, TASK_MIN_FREE_MB, TASK_RETAIN_DAYS,
-    TASK_RETRY_CONCURRENCY, TOKEN, WEB_HOST, WEB_PORT, mask_proxy_url,
+    DOWNLOAD_TIMEOUT, PROXY, SAVE_DIR, MIN_FREE_MB,
+    TOKEN, WEB_HOST, WEB_PORT, mask_proxy_url,
 )
 from core.utils import DB_PATH, get_db_connection
-from core import retry_service
 from core import runtime_state
-from core import task_manager
 from core import user_api
 from webapp import health as health_service
 
@@ -24,8 +24,6 @@ router = APIRouter()
 @router.get("/api/status")
 def get_system_status():
     disk = shutil.disk_usage(SAVE_DIR)
-    _, task_total, counts = task_manager.list_tasks(limit=1, offset=0)
-    last_failed_tasks, _, _ = task_manager.list_tasks(status="failed", limit=1, offset=0)
     runtime = runtime_state.snapshot()
     health = health_service.cached()
     thumb_bytes = health.get("thumb_bytes") if health else None
@@ -65,7 +63,7 @@ def get_system_status():
             "disk_total": disk.total,
             "disk_used": disk.used,
             "disk_free": disk.free,
-            "min_free_mb": TASK_MIN_FREE_MB,
+            "min_free_mb": MIN_FREE_MB,
             "db_size": db_size,
             "media_count": media_count,
             "media_bytes": media_bytes,
@@ -75,28 +73,52 @@ def get_system_status():
             "duplicate_wasted_bytes": duplicate[1],
         },
         "health": health,
-        "tasks": {
-            "total": task_total,
-            "counts": counts,
-            "last_failed": last_failed_tasks[0] if last_failed_tasks else None,
-            "retry_pending": retry_service.queue_status()["pending"],
-            "retain_days": TASK_RETAIN_DAYS,
-        },
         "config": {
             "web_host": WEB_HOST,
             "web_port": WEB_PORT,
             "download_timeout": DOWNLOAD_TIMEOUT,
             "download_stall_timeout": DOWNLOAD_STALL_TIMEOUT,
             "download_retries": DOWNLOAD_RETRIES,
-            "retry_concurrency": TASK_RETRY_CONCURRENCY,
             "allowed_users": len(ALLOWED_USERS),
         },
     })
 
 
+class HealthRepairPayload(BaseModel):
+    action: str = "all"
+
+
+class HealthCleanPayload(BaseModel):
+    ids: Optional[List[int]] = None
+
+
 @router.post("/api/status/health")
 def run_health_check():
     return ok(health_service.snapshot(force=True))
+
+
+@router.get("/api/status/health/issues")
+def get_health_issues(
+    type: str = Query("all"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    if type not in ("all", "missing_files", "missing_thumbs", "missing_dimensions"):
+        raise BusinessError(VALIDATION_FAILED, "非法的 issue 类型")
+    return ok(health_service.list_issues(issue_type=type, limit=limit, offset=offset))
+
+
+@router.post("/api/status/health/repair")
+def repair_health(payload: HealthRepairPayload = HealthRepairPayload()):
+    action = payload.action or "all"
+    if action not in ("thumbs", "dimensions", "all"):
+        raise BusinessError(VALIDATION_FAILED, "非法的修复操作类型")
+    return ok(health_service.repair_issues(action=action))
+
+
+@router.post("/api/status/health/clean-missing")
+def clean_missing(payload: HealthCleanPayload = HealthCleanPayload()):
+    return ok(health_service.clean_missing_records(ids=payload.ids))
 
 
 @router.get("/healthz")

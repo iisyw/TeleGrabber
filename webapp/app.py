@@ -19,7 +19,7 @@ from webapp.api_response import (
 )
 from core.config import SAVE_DIR
 from core import runtime_state
-from webapp.routers import media, sources, status, storage, tasks
+from webapp.routers import media, sources, status, storage
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("webapp")
@@ -94,7 +94,6 @@ async def handle_unexpected_error(request: Request, exc: Exception):
 # 路由顺序：API -> 静态资源 -> 前端入口 -> SPA 回退
 app.include_router(media.router)
 app.include_router(sources.router)
-app.include_router(tasks.router)
 app.include_router(storage.router)
 app.include_router(status.router)
 

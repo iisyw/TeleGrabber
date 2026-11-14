@@ -42,6 +42,8 @@ allowed_file_extensions = [
 save_dir = "downloads"
 # 运行数据目录（SQLite、Pyrogram session、审计日志、缩略图）
 data_dir = "data"
+# 下载前要求的最小剩余磁盘空间（MB）
+min_free_mb = 512
 
 [web]
 # Web 管理后台监听地址
@@ -49,14 +51,6 @@ data_dir = "data"
 host = "127.0.0.1"
 # Web 管理后台端口（与 web/.env.development 的代理目标保持一致）
 port = 5005
-
-[tasks]
-# 终态下载任务保留天数（0 表示永久保留）
-retain_days = 30
-# 任务重试并发数（1-10）
-retry_concurrency = 2
-# 下载前要求的最小剩余磁盘空间（MB）
-min_free_mb = 512
 
 [audit]
 # 审计日志：记录每条收到的消息的源信息和完整原始数据到 data/audit_*.json

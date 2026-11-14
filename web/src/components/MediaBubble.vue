@@ -9,7 +9,7 @@
       {{ avatarInitial(publisher) }}
     </div>
 
-    <div class="bubble">
+    <div class="bubble" :style="bubbleStyle">
       <div
         class="msg-name-row"
         :class="{ 'msg-name-row--empty': !publisher && !sourceType }"
@@ -69,8 +69,6 @@
               v-if="thumb && !posterFailed"
               class="single-media video-poster"
               :src="thumb"
-              :width="refItem.width || undefined"
-              :height="refItem.height || undefined"
               loading="lazy"
               decoding="async"
               @error="posterFailed = true"
@@ -86,8 +84,6 @@
             v-else
             class="single-media"
             :src="thumb || originalUrl"
-            :width="refItem.width || undefined"
-            :height="refItem.height || undefined"
             loading="lazy"
             decoding="async"
             @error="onImageError"
@@ -145,25 +141,57 @@ const thumb = computed(() => thumbUrl(refItem.value));
 const originalUrl = computed(() => mediaUrl(refItem.value));
 const posterFailed = ref(false);
 
-const singleMediaStyle = computed(() => {
+const mediaDimensions = computed(() => {
   const w = Number(refItem.value.width);
   const h = Number(refItem.value.height);
   if (w > 0 && h > 0) {
-    // 限制单张媒体在最大 400x400 的容器内等比缩放，提前预占真实物理宽高，防止图片异步载入时高度塌陷与抖动
+    // 对齐 Telegram 消息流布局：钳位纵横比在舒适范围内，设置最小宽度保护，防止极细长竖屏视频塌陷为过窄立柱
     const maxW = 400;
     const maxH = 400;
-    const scale = Math.min(maxW / w, maxH / h, 1);
-    const boxW = Math.round(w * scale);
-    const boxH = Math.round(h * scale);
-    return {
-      width: `${boxW}px`,
-      height: `${boxH}px`,
-      maxWidth: '100%',
-      aspectRatio: `${w} / ${h}`,
-    };
+    const minW = 280;
+    const minRatio = 0.7;
+    const maxRatio = 1.85;
+
+    const rawRatio = w / h;
+    const clampedRatio = Math.max(minRatio, Math.min(maxRatio, rawRatio));
+
+    let boxW;
+    let boxH;
+    if (clampedRatio <= 1) {
+      boxH = Math.min(Math.max(h, 240), maxH);
+      boxW = Math.round(boxH * clampedRatio);
+      if (boxW < minW) {
+        boxW = minW;
+        boxH = Math.min(maxH, Math.round(boxW / clampedRatio));
+      }
+    } else {
+      boxW = Math.min(Math.max(w, minW), maxW);
+      boxH = Math.round(boxW / clampedRatio);
+      if (boxH > maxH) {
+        boxH = maxH;
+        boxW = Math.min(maxW, Math.round(boxH * clampedRatio));
+      }
+    }
+
+    return { boxW, boxH };
   }
+  return { boxW: 320, boxH: 240 };
+});
+
+const bubbleStyle = computed(() => {
+  if (isMulti.value) return {};
+  const { boxW } = mediaDimensions.value;
   return {
-    maxWidth: '400px',
+    width: `${boxW}px`,
+  };
+});
+
+const singleMediaStyle = computed(() => {
+  const { boxW, boxH } = mediaDimensions.value;
+  return {
+    width: '100%',
+    height: `${boxH}px`,
+    aspectRatio: `${boxW} / ${boxH}`,
   };
 });
 

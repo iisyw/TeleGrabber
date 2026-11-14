@@ -25,7 +25,6 @@ from core.telegram_meta import get_message_date, get_message_id, utc_to_local
 from core.audit import append_audit
 from core.utils import save_to_db, get_duplicate_info, delete_media_records
 from core import user_api
-from core import task_manager
 from bot import state
 from bot.helpers import get_forward_source_info
 from bot.download import (
@@ -69,137 +68,6 @@ def _is_other_user_private_large(user_obj, media_info, file_size, group_info):
 
 
 
-def ensure_media_group_tasks(group_info):
-    """为媒体组中的媒体项预先创建 download_tasks 记录（状态为 queued/skipped）。
-
-    使 Web 任务中心即时展示所有排队中/收集到的媒体项，并支持在 Web 端查看与取消。
-    幂等：已有有效 task_id 的项不会重复创建。
-    """
-    if not group_info:
-        return
-
-    chat_id = group_info.get('chat_id')
-    media_group_id = group_info.get('media_group_id')
-    user_id = group_info.get('user_id')
-    user_name = group_info.get('user_name')
-    source_name = group_info.get('source_name')
-    source_type = group_info.get('source_type')
-    caption = group_info.get('caption')
-    media_items = group_info.get('media_items', [])
-
-    batch_id = group_info.setdefault('batch_id', uuid.uuid4().hex)
-    base_timestamp = group_info.setdefault('base_timestamp', generate_temp_filename(media_group_id))
-
-    user_obj = _stub_user({'user_id': user_id, 'user_name': user_name})
-    save_dir = get_save_directory(user_obj, source_name, source_type)
-
-    for index, item in enumerate(media_items, 1):
-        tid = item.get('task_id')
-        if tid:
-            existing = task_manager.get_task(tid)
-            if existing:
-                if existing.get('status') in ('failed', 'cancelled') and not item.get('status'):
-                    task_manager.reset_task(tid)
-                continue
-
-        file_unique_id = item.get('file_unique_id')
-        media_type = item.get('media_type', 'photo')
-        file_size = item.get('file_size', 0) or 0
-        message_id = item.get('current_message_id') or item.get('message_id')
-        ext = item.get('ext') or ('.mp4' if media_type == 'video' else '.jpg')
-        final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
-
-        dup_info = get_duplicate_info(file_unique_id) if file_unique_id else None
-        if dup_info:
-            try:
-                fname = dup_info['filename']
-                src = dup_info['source_name']
-                t_id = task_manager.create_task(
-                    user_id=user_id,
-                    user_name=user_name,
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    media_group_id=media_group_id,
-                    batch_id=batch_id,
-                    file_unique_id=file_unique_id,
-                    filename=fname,
-                    media_type=media_type,
-                    source_name=src,
-                    source_type=source_type,
-                    download_method=DOWNLOAD_METHOD_BOT,
-                    total_bytes=file_size,
-                    item_index=index,
-                )
-                task_manager.update_task(t_id, status='skipped', error='检测到重复文件已跳过', filename=fname)
-                item['task_id'] = t_id
-                item['status'] = 2
-                item['dup_info'] = dup_info
-            except Exception as e:
-                logger.warning(f"创建媒体组重复任务失败: {e}")
-            continue
-
-        item.setdefault(
-            'download_method',
-            DOWNLOAD_METHOD_USER if file_size >= 20 * 1024 * 1024 else DOWNLOAD_METHOD_BOT
-        )
-        is_user_api = item.get('download_method') == DOWNLOAD_METHOD_USER
-
-        retry_ctx = {
-            'file_id': item.get('file_id'),
-            'file_unique_id': file_unique_id,
-            'thumb_file_id': item.get('thumb_file_id'),
-            'media_type': media_type,
-            'date_dir': save_dir,
-            'caption': item.get('caption') or caption,
-            'source_name': source_name,
-            'source_id': group_info.get('source_id'),
-            'source_link1': item.get('source_link1') or group_info.get('source_link1'),
-            'source_username': item.get('source_username') or group_info.get('source_username'),
-            'source_type': source_type,
-            'link_chat_id': item.get('link_chat_id'),
-            'link_message_id': item.get('link_message_id'),
-            'orig_chat_id': item.get('orig_chat_id'),
-            'orig_msg_id': item.get('orig_msg_id'),
-            'chat_id': chat_id,
-            'chat_type': group_info.get('chat_type'),
-            'message_id': item.get('original_message_id') or item.get('orig_message_id') or item.get('orig_msg_id'),
-            'current_message_id': message_id,
-            'original_message_id': item.get('original_message_id') or item.get('orig_message_id') or item.get('orig_msg_id'),
-            'message_time': item.get('message_date') or item.get('message_time'),
-            'user_id': user_id,
-            'user_name': user_name,
-            'file_size': file_size,
-            'width': item.get('width'),
-            'height': item.get('height'),
-            'media_group_id': media_group_id,
-            'batch_id': batch_id,
-            'item_index': index,
-            'base_timestamp': base_timestamp,
-        }
-
-        try:
-            t_id = task_manager.create_task(
-                user_id=user_id,
-                user_name=user_name,
-                chat_id=chat_id,
-                message_id=message_id,
-                media_group_id=media_group_id,
-                batch_id=batch_id,
-                file_unique_id=file_unique_id,
-                filename=final_filename,
-                media_type=media_type,
-                source_name=source_name,
-                source_type=source_type,
-                download_method='user_api' if is_user_api else 'bot',
-                total_bytes=file_size,
-                item_index=index,
-                retry_context=retry_ctx,
-            )
-            item['task_id'] = t_id
-        except Exception as e:
-            logger.warning(f"为媒体组创建排队任务失败: {e}")
-
-
 def load_media_groups_collection():
     """从文件加载媒体组收集状态（启动时调用），恢复未完成任务并清理已完成项。"""
     try:
@@ -235,7 +103,6 @@ def load_media_groups_collection():
                     state.active_collections[key] = group_info
                     if key not in state.pending_media_groups:
                         state.pending_media_groups.append(key)
-                    ensure_media_group_tasks(group_info)
 
             logger.info(
                 f"已从磁盘恢复媒体组：{len(state.active_collections)} 个待处理，"
@@ -268,7 +135,6 @@ def save_media_groups_collection(collection=None):
                     'user_id': value['user_id'],
                     'user_name': value['user_name'],
                     'media_group_id': value['media_group_id'],
-                    'batch_id': value.get('batch_id'),
                     'base_timestamp': value.get('base_timestamp'),
                     'media_items': value['media_items'],
                     'first_time': value['first_time'],
@@ -379,10 +245,6 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
                 state.active_collections[collection_key]['caption'] = message.caption
             logger.debug(f"媒体组 {media_group_id} 追加{media_type}，总数: {len(existing_items)}")
         count = len(state.active_collections[collection_key]['media_items'])
-        current_group = state.active_collections.get(collection_key)
-
-    if current_group:
-        ensure_media_group_tasks(current_group)
 
     # 仅首条发送状态消息（await 放在锁外），发完回填 message_id
     if is_first_media and context and message:
@@ -423,10 +285,6 @@ def schedule_media_group_processing(context, media_group_id, chat_id):
             state.pending_media_groups.append(collection_key)
             logger.debug(f"媒体组 {media_group_id} 已添加到处理队列，当前队列长度: {len(state.pending_media_groups)}")
 
-        group_info = state.active_collections.get(collection_key)
-        if group_info:
-            ensure_media_group_tasks(group_info)
-
     ensure_media_group_worker(context.job_queue, delay=state.MEDIA_GROUP_COLLECT_TIME)
     logger.debug(f"已安排媒体组 {media_group_id} 的处理任务")
 
@@ -445,8 +303,6 @@ async def process_next_media_group(context):
         # 检查队首媒体组是否已满收集时间窗口 (2秒)
         collection_key = state.pending_media_groups[0]
         group_info = state.active_collections.get(collection_key)
-        if group_info:
-            ensure_media_group_tasks(group_info)
         if group_info and group_info.get('first_time'):
             try:
                 first_dt = datetime.fromisoformat(group_info['first_time'])
@@ -620,7 +476,6 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                     delete_media_records(all_ids)
                 for item in media_items:
                     item['status'] = 0
-                    item.pop('task_id', None)
             elif retry_type == "this":
                 to_delete = [item['file_unique_id'] for item in media_items if item.get('status') == 1]
                 if to_delete:
@@ -628,20 +483,10 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                     delete_media_records(to_delete)
                 for item in media_items:
                     item['status'] = 0
-                    item.pop('task_id', None)
             elif retry_type == "failed":
                 for item in media_items:
                     if item.get('status') == 3:
                         item['status'] = 0
-                batch_id = group_info.setdefault('batch_id', uuid.uuid4().hex)
-                ensure_media_group_tasks(group_info)
-            else:
-                batch_id = uuid.uuid4().hex
-                group_info['batch_id'] = batch_id
-                ensure_media_group_tasks(group_info)
-        else:
-            batch_id = group_info.setdefault('batch_id', uuid.uuid4().hex)
-            ensure_media_group_tasks(group_info)
 
         mg_header = group_info.get('_mg_header', '')
         items_status = [item.get('status', 0) for item in media_items]
@@ -736,24 +581,11 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
 
         def download_and_save_task(index, media_info):
             is_internally_saving = False
-            task_id = media_info.get('task_id')
             file_unique_id = media_info['file_unique_id']
             try:
                 if items_status[index - 1] in [1, 2]:
                     return True
                 media_info.pop('fail_reason', None)
-
-                # 检查任务是否已在 Web 任务中心被用户取消
-                if task_id:
-                    task = task_manager.get_task(task_id)
-                    if task and (task.get('status') == 'cancelled' or task.get('cancel_requested')):
-                        logger.info(f"媒体项 {index} 已在任务中心被取消，跳过下载")
-                        with progress_lock:
-                            items_status[index - 1] = 3
-                            media_info['status'] = 3
-                            media_info['fail_reason'] = "已取消"
-                        update_ui_async()
-                        return False
 
                 dup_info = get_duplicate_info(file_unique_id)
                 with state.saving_lock:
@@ -774,30 +606,6 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                         items_status[index - 1] = 2
                         media_info['status'] = 2
                         processed_count['value'] += 1
-                    try:
-                        if task_id:
-                            task_manager.update_task(task_id, status='skipped', error='检测到重复文件已跳过', filename=fname)
-                        else:
-                            tid = task_manager.create_task(
-                                user_id=user_obj.id if user_obj else None,
-                                user_name=user_obj.username if user_obj else None,
-                                chat_id=group_info.get('chat_id'),
-                                message_id=media_info.get('current_message_id') or media_info.get('message_id'),
-                                media_group_id=media_group_id,
-                                batch_id=batch_id,
-                                file_unique_id=file_unique_id,
-                                filename=fname,
-                                media_type=media_info.get('media_type'),
-                                source_name=src,
-                                source_type=group_info.get('source_type'),
-                                download_method=DOWNLOAD_METHOD_BOT,
-                                total_bytes=media_info.get('file_size', 0) or 0,
-                                item_index=index,
-                            )
-                            task_manager.update_task(tid, status='skipped', error='检测到重复文件已跳过', filename=fname)
-                            media_info['task_id'] = tid
-                    except Exception as te:
-                        logger.warning(f"记录媒体组跳过任务失败: {te}")
                     update_ui_async()
                     return True
             except Exception as e:
@@ -808,73 +616,13 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                 media_info['download_method'] = media_info.get('download_method', DOWNLOAD_METHOD_BOT)
                 force_user_api = media_info.get('download_method') == DOWNLOAD_METHOD_USER
 
-                if task_id:
-                    task_manager.update_task(task_id, status='downloading')
-                else:
-                    try:
-                        task_id = task_manager.create_task(
-                            user_id=user_obj.id,
-                            user_name=user_obj.username,
-                            chat_id=group_info.get('chat_id'),
-                            message_id=media_info.get('current_message_id') or media_info.get('message_id'),
-                            media_group_id=media_group_id,
-                            batch_id=batch_id,
-                            file_unique_id=file_unique_id,
-                            media_type=media_info.get('media_type'),
-                            source_name=source_name,
-                            source_type=source_type,
-                            download_method='user_api' if force_user_api else 'bot',
-                            total_bytes=file_size,
-                            item_index=index,
-                            retry_context={
-                                'file_id': media_info.get('file_id'),
-                                'file_unique_id': file_unique_id,
-                                'thumb_file_id': media_info.get('thumb_file_id'),
-                                'media_type': media_info.get('media_type'),
-                                'date_dir': save_dir,
-                                'caption': media_info.get('caption') or caption,
-                                'source_name': source_name,
-                                'source_id': group_info.get('source_id'),
-                                'source_link1': media_info.get('source_link1') or group_info.get('source_link1'),
-                                'source_username': media_info.get('source_username') or group_info.get('source_username'),
-                                'source_type': source_type,
-                                'link_chat_id': media_info.get('link_chat_id'),
-                                'link_message_id': media_info.get('link_message_id'),
-                                'orig_chat_id': media_info.get('orig_chat_id'),
-                                'orig_msg_id': media_info.get('orig_msg_id'),
-                                'chat_id': group_info.get('chat_id'),
-                                'chat_type': group_info.get('chat_type'),
-                                'message_id': media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
-                                'current_message_id': media_info.get('current_message_id') or media_info.get('message_id'),
-                                'original_message_id': media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
-                                'message_time': media_info.get('message_date') or media_info.get('message_time'),
-                                'user_id': user_obj.id,
-                                'user_name': user_obj.username,
-                                'file_size': file_size,
-                                'width': media_info.get('width'),
-                                'height': media_info.get('height'),
-                                'media_group_id': media_group_id,
-                                'batch_id': batch_id,
-                                'item_index': index,
-                                'base_timestamp': base_timestamp,
-                            },
-                        )
-                        task_manager.update_task(task_id, status='downloading')
-                        media_info['task_id'] = task_id
-                    except Exception as task_error:
-                        logger.warning(f"创建下载任务失败: {task_error}")
-
                 # 大文件或 /link 来源走 User API (本身就是同步阻塞调用，线程里直接调)
                 if force_user_api or (USER_API_ENABLED and file_size >= 20 * 1024 * 1024):
                     if _is_other_user_private_large(user_obj, media_info, file_size, group_info):
                         media_info['fail_reason'] = USER_API_PRIVATE_LARGE_REASON
-                        if task_id:
-                            task_manager.finish_task(task_id, 'failed', error=USER_API_PRIVATE_LARGE_REASON)
                         raise Exception(USER_API_PRIVATE_LARGE_REASON)
 
                     media_info['download_method'] = DOWNLOAD_METHOD_USER
-                    if task_id:
-                        task_manager.update_task(task_id, download_method='user_api')
                     ext = media_info.get('ext') or (".mp4" if media_info.get('media_type') == 'video' else ".jpg")
                     final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
                     final_path = os.path.join(save_dir, final_filename)
@@ -888,15 +636,11 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                         item_progress[index - 1] = 0
 
                     def p_callback(current, total, idx=index):
-                        if task_id and task_manager.is_cancel_requested(task_id):
-                            raise Exception("下载已被用户取消")
                         if total > 0:
                             percent = int(current * 100 / total)
                             if percent != item_progress[idx - 1]:
                                 with progress_lock:
                                     item_progress[idx - 1] = percent
-                                if task_id:
-                                    task_manager.update_progress(task_id, current, total)
                                 update_ui_async()
                         else:
                             update_ui_async()
@@ -955,12 +699,8 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                 os.remove(final_path)
                             except OSError:
                                 pass
-                            if task_id:
-                                task_manager.finish_task(task_id, 'failed', error='元数据保存数据库失败')
                             raise Exception("元数据保存数据库失败 (可能数据库被锁定)")
                         _save_group_thumb(media_info, file_unique_id)
-                        if task_id:
-                            task_manager.finish_task(task_id, 'success', filename=final_filename)
                         with progress_lock:
                             items_status[index - 1] = 1
                             media_info['status'] = 1
@@ -968,9 +708,6 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                         update_ui_async()
                         return True
                     raise Exception("User API 下载失败")
-
-                if task_id and task_manager.is_cancel_requested(task_id):
-                    raise Exception("下载已被用户取消")
 
                 # 小文件走 Bot API：在主事件循环里 await 下载，线程这里阻塞等结果
                 media_type = media_info.get('media_type', 'photo')
@@ -983,14 +720,6 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                 # 设超时兜底：正常不会触发，仅防极端情况下主循环异常导致本线程永久挂起；
                 # 超时会抛 TimeoutError，被下方 except 捕获，该项标记为失败，不拖垮整组。
                 fut.result(timeout=300)
-
-                if task_id and task_manager.is_cancel_requested(task_id):
-                    try:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                    except OSError:
-                        pass
-                    raise Exception("下载已被用户取消")
 
                 ext = get_video_extension(temp_path) if media_type == 'video' else get_image_extension(temp_path)
                 final_filename = f"{media_group_id}_{index}_{base_timestamp}{ext}"
@@ -1018,12 +747,8 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                         os.remove(final_path)
                     except OSError:
                         pass
-                    if task_id:
-                        task_manager.finish_task(task_id, 'failed', error='元数据保存数据库失败')
                     raise Exception("元数据保存数据库失败 (可能数据库被锁定)")
                 _save_group_thumb(media_info, file_unique_id)
-                if task_id:
-                    task_manager.finish_task(task_id, 'success', filename=final_filename)
                 with progress_lock:
                     items_status[index - 1] = 1
                     media_info['status'] = 1
@@ -1033,13 +758,10 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
             except Exception as e:
                 logger.error(f"媒体项 {index} 下载失败: {e}")
                 err_msg = str(e)
-                is_cancelled = "已被用户取消" in err_msg or (task_id and task_manager.is_cancel_requested(task_id))
-                if task_id:
-                    task_manager.finish_task(task_id, 'cancelled' if is_cancelled else 'failed', error=err_msg)
                 with progress_lock:
                     items_status[index - 1] = 3
                     media_info['status'] = 3
-                    media_info['fail_reason'] = "已取消" if is_cancelled else err_msg
+                    media_info['fail_reason'] = err_msg
                 update_ui_async()
                 return False
             finally:

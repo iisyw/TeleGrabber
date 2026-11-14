@@ -12,11 +12,6 @@ const routes = [
     component: () => import('@/views/feed/index.vue'),
   },
   {
-    path: '/tasks',
-    name: 'tasks',
-    component: () => import('@/views/tasks/index.vue'),
-  },
-  {
     path: '/storage',
     name: 'storage',
     component: () => import('@/views/storage/index.vue'),

@@ -117,39 +117,6 @@ def init_db():
         )
     ''')
 
-    # 下载任务中心
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS download_tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            user_name TEXT,
-            chat_id INTEGER,
-            message_id INTEGER,
-            media_group_id TEXT,
-            batch_id TEXT,
-            file_unique_id TEXT,
-            filename TEXT,
-            media_type TEXT,
-            source_name TEXT,
-            source_type TEXT,
-            download_method TEXT,
-            status TEXT NOT NULL DEFAULT 'queued',
-            progress INTEGER NOT NULL DEFAULT 0,
-            downloaded_bytes INTEGER NOT NULL DEFAULT 0,
-            total_bytes INTEGER NOT NULL DEFAULT 0,
-            error TEXT,
-            item_index INTEGER,
-            retry_context TEXT,
-            cancel_requested INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT,
-            updated_at TEXT,
-            finished_at TEXT
-        )
-    ''')
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status_updated ON download_tasks(status, updated_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_group ON download_tasks(media_group_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_batch ON download_tasks(batch_id)")
-
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS _schema_docs (
             table_name TEXT,

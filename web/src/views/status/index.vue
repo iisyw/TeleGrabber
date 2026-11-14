@@ -69,22 +69,6 @@
 
       <div class="status-card">
         <div class="status-card-head">
-          <span>下载队列</span>
-          <span :class="['status-dot', status.tasks.counts.failed ? 'warn' : 'ok']" />
-        </div>
-        <div class="status-card-value">
-          {{ status.tasks.counts.downloading || 0 }} 下载中 · {{ status.tasks.counts.queued || 0 }} 排队
-        </div>
-        <div class="status-card-sub">
-          暂停 {{ status.tasks.counts.paused || 0 }} · 失败 {{ status.tasks.counts.failed || 0 }} · 重试队列 {{ status.tasks.retry_pending }}
-        </div>
-        <div class="status-card-sub">
-          成功 {{ status.tasks.counts.success || 0 }} · 总计 {{ status.tasks.total }}
-        </div>
-      </div>
-
-      <div class="status-card">
-        <div class="status-card-head">
           <span>磁盘空间（全盘）</span>
           <span :class="['status-dot', freePercent > 15 ? 'ok' : 'warn']" />
         </div>
@@ -147,30 +131,55 @@
           数据健康
           <span v-if="status.health" class="health-checked">检查于 {{ formatTime(status.health.checked_at) }}</span>
         </span>
-        <button
-          class="btn btn-small btn-cancel"
-          :disabled="healthLoading"
-          @click="runHealth"
-        >
-          {{ healthLoading ? '检查中...' : (status.health ? '重新检查' : '执行健康检查') }}
-        </button>
+        <div class="health-actions-group">
+          <button
+            v-if="status.health && (status.health.missing_thumbs || status.health.missing_dimensions)"
+            class="btn btn-small"
+            :disabled="quickRepairing"
+            @click="handleQuickRepair"
+          >
+            {{ quickRepairing ? '修复中...' : '一键全部修复' }}
+          </button>
+          <button
+            class="btn btn-small btn-cancel"
+            :disabled="healthLoading"
+            @click="runHealth"
+          >
+            {{ healthLoading ? '检查中...' : (status.health ? '重新检查' : '执行健康检查') }}
+          </button>
+        </div>
       </div>
       <div v-if="!status.health" class="health-empty">
-        尚未执行健康检查。检查会扫描数据库记录、磁盘文件和缩略图目录，媒体较多时可能需要一点时间。
+        {{ healthLoading ? '正在执行首次健康检查，请稍候...' : '尚未执行健康检查。检查会扫描数据库记录、磁盘文件和缩略图目录，媒体较多时可能需要一点时间。' }}
       </div>
       <template v-else>
         <div class="status-metrics">
-          <div :class="['status-metric', status.health.missing_files ? 'bad' : '']">
+          <div
+            :class="['status-metric', status.health.missing_files ? 'bad status-metric--clickable' : '']"
+            @click="status.health.missing_files ? openIssuesDrawer('missing_files') : null"
+            :title="status.health.missing_files ? '点击查看原文件丢失的媒体列表' : ''"
+          >
             <span>缺失文件</span>
             <strong>{{ status.health.missing_files }}</strong>
+            <span v-if="status.health.missing_files" class="metric-link-hint">查看列表 &rsaquo;</span>
           </div>
-          <div :class="['status-metric', status.health.missing_thumbs ? 'warn' : '']">
+          <div
+            :class="['status-metric', status.health.missing_thumbs ? 'warn status-metric--clickable' : '']"
+            @click="status.health.missing_thumbs ? openIssuesDrawer('missing_thumbs') : null"
+            :title="status.health.missing_thumbs ? '点击查看缺失缩略图的媒体列表并修复' : ''"
+          >
             <span>缺失缩略图</span>
             <strong>{{ status.health.missing_thumbs }}</strong>
+            <span v-if="status.health.missing_thumbs" class="metric-link-hint">查看 & 修复 &rsaquo;</span>
           </div>
-          <div :class="['status-metric', status.health.missing_dimensions ? 'warn' : '']">
+          <div
+            :class="['status-metric', status.health.missing_dimensions ? 'warn status-metric--clickable' : '']"
+            @click="status.health.missing_dimensions ? openIssuesDrawer('missing_dimensions') : null"
+            :title="status.health.missing_dimensions ? '点击查看缺少尺寸大小的媒体列表并修复' : ''"
+          >
             <span>缺少尺寸/大小</span>
             <strong>{{ status.health.missing_dimensions }}</strong>
+            <span v-if="status.health.missing_dimensions" class="metric-link-hint">查看 & 修复 &rsaquo;</span>
           </div>
           <div class="status-metric">
             <span>记录总数</span>
@@ -178,7 +187,7 @@
           </div>
         </div>
         <div class="health-hint">
-          缺失文件通常意味着数据库记录存在但磁盘文件已被移动或删除。
+          点击异常指标可查看问题媒体清单，缺失缩略图与尺寸大小支持一键自动修复补全。
         </div>
       </template>
     </div>
@@ -193,18 +202,6 @@
         <pre>{{ status.runtime.last_error }}</pre>
       </div>
       <div v-else class="manage-empty">暂无运行错误</div>
-
-      <div v-if="status.tasks.last_failed" class="last-failed">
-        <div class="last-failed-title">
-          最近失败任务
-          <router-link to="/tasks?status=failed" class="last-failed-link">去任务中心</router-link>
-        </div>
-        <div class="last-failed-row">
-          <span class="task-filename">{{ status.tasks.last_failed.filename || status.tasks.last_failed.file_unique_id || '-' }}</span>
-          <span class="last-failed-error">{{ status.tasks.last_failed.error || '-' }}</span>
-          <span class="status-card-sub">{{ formatTime(status.tasks.last_failed.updated_at) }}</span>
-        </div>
-      </div>
     </div>
 
     <div v-if="status" class="storage-section">
@@ -217,27 +214,36 @@
         <span>下载超时</span><span>{{ status.config.download_timeout }} 秒</span>
         <span>卡死判定</span><span>{{ status.config.download_stall_timeout }} 秒</span>
         <span>下载重试</span><span>{{ status.config.download_retries }} 次</span>
-        <span>重试并发</span><span>{{ status.config.retry_concurrency }}</span>
         <span>允许用户</span><span>{{ status.config.allowed_users ? `${status.config.allowed_users} 人` : '不限制' }}</span>
-        <span>任务保留</span><span>{{ status.tasks.retain_days }} 天</span>
         <span>最小剩余空间</span><span>{{ status.storage.min_free_mb }} MB</span>
       </div>
     </div>
 
     <div v-if="!status && error" class="manage-empty">{{ error }}</div>
+
+    <HealthIssuesDrawer
+      v-model="drawerOpen"
+      :initial-type="drawerType"
+      @repaired="onRepaired"
+    />
   </div>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { fetchSystemStatus, runHealthCheck } from '@/api/status';
+import { ElMessage } from 'element-plus';
+import { fetchSystemStatus, runHealthCheck, repairHealthIssues } from '@/api/status';
 import { formatBytes, formatTime } from '@/lib/media';
+import HealthIssuesDrawer from './components/HealthIssuesDrawer.vue';
 
 const status = ref(null);
 const error = ref('');
 const autoRefresh = ref(false);
 const healthLoading = ref(false);
+const quickRepairing = ref(false);
 const lastChecked = ref('');
+const drawerOpen = ref(false);
+const drawerType = ref('all');
 let timer = null;
 
 const freePercent = computed(() => {
@@ -265,11 +271,6 @@ const checklist = computed(() => {
       ok: freePercent.value > 15,
       hint: `剩余 ${formatBytes(data.storage.disk_free)}`,
     },
-    {
-      label: '失败任务',
-      ok: !data.tasks.counts.failed,
-      hint: data.tasks.counts.failed ? `${data.tasks.counts.failed} 个失败任务待处理` : '无失败任务',
-    },
   ];
 });
 
@@ -283,6 +284,9 @@ async function load() {
   try {
     status.value = await fetchSystemStatus();
     error.value = '';
+    if (status.value && !status.value.health && !healthLoading.value) {
+      runHealth();
+    }
   } catch {
     error.value = '刷新失败，当前显示的是上一次成功获取的数据';
   } finally {
@@ -295,6 +299,7 @@ function toggleAutoRefresh() {
 }
 
 async function runHealth() {
+  if (healthLoading.value) return;
   healthLoading.value = true;
   try {
     await runHealthCheck();
@@ -304,6 +309,31 @@ async function runHealth() {
   } finally {
     healthLoading.value = false;
   }
+}
+
+function openIssuesDrawer(type = 'all') {
+  drawerType.value = type;
+  drawerOpen.value = true;
+}
+
+async function handleQuickRepair() {
+  if (quickRepairing.value) return;
+  quickRepairing.value = true;
+  try {
+    const res = await repairHealthIssues('all');
+    const thumbs = (res && res.repaired_thumbs) || 0;
+    const dims = (res && res.repaired_dimensions) || 0;
+    ElMessage.success(`修复完成：补齐 ${thumbs} 个缩略图，${dims} 条尺寸数据`);
+    await load();
+  } catch {
+    // 错误由 request.js 统一提示
+  } finally {
+    quickRepairing.value = false;
+  }
+}
+
+function onRepaired() {
+  load();
 }
 
 onMounted(() => {

@@ -181,51 +181,6 @@ class TestMediaGroupQueue(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-    def test_ensure_media_group_tasks_creates_queued_tasks(self):
-        """测试 ensure_media_group_tasks 为入队媒体组生成 queued 状态任务"""
-        from bot.media_group import ensure_media_group_tasks
-        from core import task_manager
-
-        group_info = {
-            'chat_id': 12345,
-            'user_id': 67890,
-            'user_name': 'test_user',
-            'media_group_id': 'mg_test_queue',
-            'source_name': 'test_channel',
-            'source_type': 'channel',
-            'media_items': [
-                {'file_id': 'fid_q1', 'file_unique_id': 'fuid_q1', 'media_type': 'photo', 'file_size': 1024},
-                {'file_id': 'fid_q2', 'file_unique_id': 'fuid_q2', 'media_type': 'video', 'file_size': 30 * 1024 * 1024},
-            ],
-        }
-
-        with patch('bot.media_group.get_duplicate_info', return_value=None):
-            with patch('bot.media_group.get_save_directory', return_value='/tmp'):
-                ensure_media_group_tasks(group_info)
-
-        item1 = group_info['media_items'][0]
-        item2 = group_info['media_items'][1]
-
-        self.assertIsNotNone(item1.get('task_id'))
-        self.assertIsNotNone(item2.get('task_id'))
-
-        t1 = task_manager.get_task(item1['task_id'])
-        t2 = task_manager.get_task(item2['task_id'])
-
-        self.assertIsNotNone(t1)
-        self.assertEqual(t1['status'], 'queued')
-        self.assertEqual(t1['download_method'], 'bot')
-
-        self.assertIsNotNone(t2)
-        self.assertEqual(t2['status'], 'queued')
-        self.assertEqual(t2['download_method'], 'user_api')
-
-        # 测试在任务中心取消排队任务
-        res = task_manager.request_cancel(item1['task_id'])
-        self.assertEqual(res, 'cancelled')
-        t1_cancelled = task_manager.get_task(item1['task_id'])
-        self.assertEqual(t1_cancelled['status'], 'cancelled')
-
 
 if __name__ == "__main__":
     unittest.main()
