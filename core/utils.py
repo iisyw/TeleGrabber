@@ -43,7 +43,6 @@ def init_db():
             source_link1 TEXT,
             source_type TEXT,
             message_time TEXT,
-            message_id INTEGER,
             current_message_id INTEGER,
             original_message_id INTEGER,
             remark TEXT DEFAULT '',
@@ -145,7 +144,6 @@ def init_db():
         ('media_metadata', 'source_username', '来源用户名（Telegram 用户名，如 sifangktv10）'),
         ('media_metadata', 'source_type', '来源类型：channel/bot/group/private_user（原始发送者类型）'),
         ('media_metadata', 'message_time', '原始消息时间（本地时间，转发时取原消息时间）'),
-        ('media_metadata', 'message_id', '原始消息 ID'),
         ('media_metadata', 'current_message_id', '机器人当前会话收到的消息 ID，用于重试下载'),
         ('media_metadata', 'original_message_id', '原始来源消息 ID，用于溯源；非转发消息可为空'),
         ('media_metadata', 'remark', '备注（如受保护内容无法下载等）'),
@@ -231,7 +229,7 @@ def get_library_stats():
     return stats
 
 
-def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, media_type='photo', caption=None, source_name=None, source_id=None, source_link1=None, source_username=None, source_type=None, message_time=None, message_id=None, current_message_id=None, original_message_id=None, width=None, height=None, file_size=None, remark=None):
+def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, media_type='photo', caption=None, source_name=None, source_id=None, source_link1=None, source_username=None, source_type=None, message_time=None, current_message_id=None, original_message_id=None, width=None, height=None, file_size=None, remark=None):
     """将媒体元数据保存到SQLite数据库"""
     if not caption:
         caption = ''
@@ -249,9 +247,9 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
                     INSERT INTO media_metadata (
                         user_id, user_name, filename, datetime, file_id, file_unique_id,
                         media_group_id, media_type, caption, source_name, source_id,
-                        source_username, source_link1, source_type, message_time, message_id,
+                        source_username, source_link1, source_type, message_time,
                         current_message_id, original_message_id, width, height, file_size, remark
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     user.id,
                     user.username or user.first_name,
@@ -268,9 +266,8 @@ def save_to_db(user, media_obj, file_name, save_dir=None, media_group_id=None, m
                     source_link1 or '',
                     source_type or 'unknown',
                     message_time,
-                    original_message_id if original_message_id is not None else message_id,
                     current_message_id,
-                    original_message_id if original_message_id is not None else message_id,
+                    original_message_id,
                     width,
                     height,
                     file_size,

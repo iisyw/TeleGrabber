@@ -197,8 +197,8 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
         'media_type': media_type,
         'width': getattr(media_obj, 'width', None),
         'height': getattr(media_obj, 'height', None),
-        'message_id': message.message_id if message else None,
-        'orig_message_id': get_message_id(message) if message else None,
+        'current_message_id': message.message_id if message else None,
+        'original_message_id': get_message_id(message) if message else None,
         'file_size': getattr(media_obj, 'file_size', 0),
         'orig_chat_id': src.get('orig_chat_id'),
         'orig_msg_id': src.get('orig_msg_id'),
@@ -209,6 +209,12 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
     with state.media_group_lock:
         is_first_media = collection_key not in state.active_collections
         if is_first_media:
+            link_meta = state.match_link_forward(
+                src.get('orig_chat_id'),
+                src.get('orig_msg_id'),
+                src.get('source_username'),
+            )
+            link_url = link_meta.get('url') if link_meta else None
             # 立刻占座（status_message_id 先留空，发完消息再回填）
             state.active_collections[collection_key] = {
                 'chat_id': chat_id,
@@ -221,21 +227,23 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
                 'source_name': src.get('source_name'),
                 'source_username': src.get('source_username'),
                 'source_id': src.get('source_id'),
-                'source_link1': src.get('source_link1'),
+                'source_link1': src.get('source_link1') or link_url,
                 'source_type': src.get('source_type'),
                 'chat_type': chat_type or (message.chat.type if message else None),
                 'caption': message.caption if message else None,
                 'raw_message': message.to_dict() if message and hasattr(message, 'to_dict') else None,
+                'link_url': link_url,
+                'link_meta': link_meta,
             }
             need_queue_hint = state.is_processing_media_group or bool(state.pending_media_groups)
         else:
             existing_items = state.active_collections[collection_key]['media_items']
             # 二次更新去重：同一条消息被 Telegram 多次推送 (如先发后改) 时，
-            # message_id 相同则视为同一项，仅更新不重复追加，避免组内出现重复/错位。
+            # current_message_id 相同则视为同一项，仅更新不重复追加，避免组内出现重复/错位。
             duplicate = False
-            if media_info['message_id'] is not None:
+            if media_info['current_message_id'] is not None:
                 for existing in existing_items:
-                    if existing.get('message_id') == media_info['message_id']:
+                    if existing.get('current_message_id') == media_info['current_message_id']:
                         existing.update(media_info)
                         duplicate = True
                         break
@@ -248,7 +256,25 @@ async def add_media_to_collection(media_group_id, chat_id, user, media_obj, medi
 
     # 仅首条发送状态消息（await 放在锁外），发完回填 message_id
     if is_first_media and context and message:
-        text = "⏳ 媒体组已加入队列，请稍候..." if need_queue_hint else "⏳ 正在收集媒体组内容，请稍候..."
+        link_url = None
+        link_meta = None
+        with state.media_group_lock:
+            grp = state.active_collections.get(collection_key)
+            if grp:
+                link_url = grp.get('link_url')
+                link_meta = grp.get('link_meta')
+
+        if link_meta and link_meta.get('status_msg_id') and link_meta.get('status_chat_id'):
+            try:
+                await context.bot.delete_message(
+                    chat_id=link_meta['status_chat_id'],
+                    message_id=link_meta['status_msg_id'],
+                )
+            except Exception:
+                pass
+
+        prefix = f"🔗 响应链接自动转存：{link_url}\n\n" if link_url else ""
+        text = f"{prefix}⏳ 媒体组已加入队列，请稍候..." if need_queue_hint else f"{prefix}⏳ 正在收集媒体组内容，请稍候..."
         try:
             status_message = await message.reply_text(text, reply_to_message_id=message.message_id)
             with state.media_group_lock:
@@ -406,6 +432,8 @@ async def process_media_group(context, collection_key=None, is_retry=False, retr
     user_api_count = len(user_api_indices)
 
     header_parts = [f"📁 检测到媒体组 ({total}项)"]
+    if group_info.get('link_url'):
+        header_parts.insert(0, f"🔗 响应链接自动转存：{group_info['link_url']}")
     if photo_count:
         header_parts.append(f"🖼️ 图片: {photo_count}张")
     if video_count:
@@ -650,7 +678,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                     orig_chat_id = media_info.get('orig_chat_id')
                     orig_msg_id = media_info.get('orig_msg_id')
                     target_chat_id = link_chat_id or orig_chat_id or chat_id
-                    target_msg_id = link_msg_id or orig_msg_id or media_info['message_id']
+                    target_msg_id = link_msg_id or orig_msg_id or media_info['current_message_id']
                     if not link_chat_id and not orig_chat_id:
                         chat_type = group_info.get('chat_type')
                         if chat_type == 'private' or source_type in ["user", "private_user"]:
@@ -673,7 +701,7 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                         if chat_type == 'private' or source_type in ["user", "private_user"]:
                             fallback_chat_id = bot_username or chat_id
                         success = user_api.run_download_large_file(
-                            fallback_chat_id, media_info['message_id'], final_path,
+                            fallback_chat_id, media_info['current_message_id'], final_path,
                             progress_callback=p_callback, file_unique_id=file_unique_id,
                         )
 
@@ -687,10 +715,9 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                    source_link1=media_info.get('source_link1') or group_info.get('source_link1'),
                                    source_username=media_info.get('source_username') or group_info.get('source_username'),
                                    source_type=source_type,
-                                   message_time=media_info.get('message_date') or media_info.get('message_time'),
-                                   message_id=media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
-                                   current_message_id=media_info.get('current_message_id') or media_info.get('message_id'),
-                                   original_message_id=media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
+                                   message_time=media_info.get('message_time') or media_info.get('message_date'),
+                                   current_message_id=media_info.get('current_message_id'),
+                                   original_message_id=media_info.get('original_message_id'),
                                    width=media_info.get('width'),
                                    height=media_info.get('height'),
                                    file_size=media_info.get('file_size'))
@@ -735,10 +762,9 @@ def _run_media_group_blocking(bot, loop, bot_username, collection_key, group_inf
                                         source_link1=media_info.get('source_link1') or group_info.get('source_link1'),
                                         source_username=media_info.get('source_username') or group_info.get('source_username'),
                                         source_type=source_type,
-                                        message_time=media_info.get('message_date') or media_info.get('message_time'),
-                                        message_id=media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
-                                        current_message_id=media_info.get('current_message_id') or media_info.get('message_id'),
-                                        original_message_id=media_info.get('original_message_id') or media_info.get('orig_message_id') or media_info.get('orig_msg_id'),
+                                        message_time=media_info.get('message_time') or media_info.get('message_date'),
+                                        current_message_id=media_info.get('current_message_id'),
+                                        original_message_id=media_info.get('original_message_id'),
                                         width=media_info.get('width'),
                                         height=media_info.get('height'),
                                         file_size=media_info.get('file_size'))

@@ -181,6 +181,33 @@ class TestMediaGroupQueue(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_link_forward_registry_lifecycle(self):
+        """测试链接抓取挂起登记与匹配消耗生命周期"""
+        state.pending_link_forwards.clear()
+
+        # 登记一条链接转发
+        state.register_link_forward(
+            mid=888,
+            ref_text="https://t.me/test_chan/888",
+            chat_id=-1001234567,
+            username="test_chan",
+            status_chat_id=12345,
+            status_msg_id=9999,
+        )
+
+        # 匹配非目标消息应为 None
+        self.assertIsNone(state.match_link_forward(-1001234567, 999))
+
+        # 匹配目标消息应成功并返回对应元数据
+        matched = state.match_link_forward(-1001234567, 888, orig_username="test_chan")
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched['url'], "https://t.me/test_chan/888")
+        self.assertEqual(matched['status_msg_id'], 9999)
+
+        # 再次匹配应为 None (已一次性消耗)
+        self.assertIsNone(state.match_link_forward(-1001234567, 888))
+
+
 
 if __name__ == "__main__":
     unittest.main()

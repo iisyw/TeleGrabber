@@ -86,7 +86,7 @@ def get_media(
         query = ("SELECT id, user_id, user_name, filename, datetime, message_time, "
                  "media_group_id, media_type, caption, source_name, source_id, "
                  "source_username, source_link1, source_type, "
-                 "file_unique_id, file_id, message_id, current_message_id, original_message_id, remark, width, height, file_size, favorite, tags "
+                 "file_unique_id, file_id, current_message_id, original_message_id, remark, width, height, file_size, favorite, tags "
                  "FROM media_metadata")
         params = []
         conditions = []
@@ -166,10 +166,10 @@ def get_media(
                 "source_username": row[11], "source_link1": row[12],
                 "source_type": row[13],
                 "file_unique_id": row[14], "file_id": row[15],
-                "message_id": row[16], "current_message_id": row[17],
-                "original_message_id": row[18], "thumb_url": get_thumb_url(row[14]),
-                "remark": row[19], "width": row[20], "height": row[21],
-                "file_size": row[22], "favorite": bool(row[23]), "tags": row[24] or '',
+                "current_message_id": row[16],
+                "original_message_id": row[17], "thumb_url": get_thumb_url(row[14]),
+                "remark": row[18], "width": row[19], "height": row[20],
+                "file_size": row[21], "favorite": bool(row[22]), "tags": row[23] or '',
             }
             for row in rows
         ])

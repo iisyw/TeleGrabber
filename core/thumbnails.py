@@ -135,7 +135,7 @@ def generate_thumbnail(original_path, file_unique_id, media_type='photo'):
     ext = os.path.splitext(original_path)[1].lower()
     frame_path = None
     try:
-        if media_type == 'video' or ext in _THUMB_EXTS:
+        if media_type in ('video', 'animation') or ext in _THUMB_EXTS:
             frame_path = _extract_video_frame(original_path)
             if not frame_path:
                 return False

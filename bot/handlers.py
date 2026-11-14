@@ -170,6 +170,19 @@ async def _process_link(update, context, args):
         forward_res = {"ok": False, "reason": "other_user"}
 
     if forward_res.get("ok"):
+        # 登记待匹配关系，供后续接收转发消息时识别并关联链接
+        msg_ids = forward_res.get("message_ids") or [message_id]
+        numeric_chat_id = forward_res.get("numeric_chat_id")
+        username = forward_res.get("username")
+        for mid in msg_ids:
+            state.register_link_forward(
+                mid=mid,
+                ref_text=ref_text,
+                chat_id=numeric_chat_id,
+                username=username,
+                status_chat_id=update.effective_chat.id,
+                status_msg_id=status_message.message_id,
+            )
         # 转发成功：消息会作为普通消息进入常规 handler，由其完成下载与保存
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -281,7 +294,6 @@ async def _process_link(update, context, args):
         'chat_type': update.effective_chat.type,
         'current_message_id': update.message.message_id,
         'original_message_id': media_info['message_id'],
-        'message_id': update.message.message_id,
         'user_id': update.effective_user.id,
         'user_name': update.effective_user.username or update.effective_user.first_name,
         'download_method': DOWNLOAD_METHOD_USER,
@@ -510,7 +522,25 @@ async def _handle_single_media(update, context, media_obj, media_type, ext_for_l
     method = 'User API' if use_user_api else 'Bot API'
     size_str = f"{file_size/1024/1024:.1f}MB" if file_size >= 1024*1024 else f"{file_size/1024:.1f}KB"
     detect_label = {'photo': '单张图片', 'video': '单个视频'}.get(media_type, label)
-    header = f"📋 检测到{detect_label}\n大小: {size_str}\n通道: {method}"
+    link_meta = state.match_link_forward(
+        source_info.get('orig_chat_id'),
+        source_info.get('orig_msg_id'),
+        source_info.get('source_username'),
+    )
+    if link_meta:
+        if link_meta.get('status_msg_id') and link_meta.get('status_chat_id'):
+            try:
+                await context.bot.delete_message(
+                    chat_id=link_meta['status_chat_id'],
+                    message_id=link_meta['status_msg_id'],
+                )
+            except Exception:
+                pass
+        link_url = link_meta.get('url')
+        source_info['source_link1'] = source_info.get('source_link1') or link_url
+        header = f"🔗 响应链接自动转存：{link_url}\n📋 检测到{detect_label}\n大小: {size_str}\n通道: {method}"
+    else:
+        header = f"📋 检测到{detect_label}\n大小: {size_str}\n通道: {method}"
 
     # 2. 大文件走 User API（带进度）
     if USER_API_ENABLED and file_size >= LARGE_FILE_THRESHOLD:

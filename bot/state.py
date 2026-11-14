@@ -69,4 +69,54 @@ def drop_single_record(key):
         single_records.pop(key, None)
 
 
+# --- 链接抓取待匹配队列 (Pending Link Registry) ---
+# 记录通过链接指令触发转发的消息元信息，用于匹配识别自动转存消息。
+pending_link_forwards = {}
+pending_link_lock = threading.RLock()
+PENDING_LINKS_LIMIT = 100
+
+
+def register_link_forward(mid, ref_text, chat_id=None, username=None, status_chat_id=None, status_msg_id=None):
+    """登记一条通过链接指令触发转发的消息元信息。"""
+    import time
+    with pending_link_lock:
+        now = time.time()
+        # 清理 5 分钟前的过期条目
+        expired = [k for k, v in pending_link_forwards.items() if now - v.get('time', now) > 300]
+        for k in expired:
+            del pending_link_forwards[k]
+
+        key = int(mid)
+        pending_link_forwards[key] = {
+            'url': ref_text,
+            'chat_id': str(chat_id) if chat_id is not None else None,
+            'username': username.lower() if username else None,
+            'status_chat_id': status_chat_id,
+            'status_msg_id': status_msg_id,
+            'time': now,
+        }
+        while len(pending_link_forwards) > PENDING_LINKS_LIMIT:
+            oldest = next(iter(pending_link_forwards))
+            del pending_link_forwards[oldest]
+
+
+def match_link_forward(orig_chat_id, orig_msg_id, orig_username=None):
+    """匹配并消耗一条挂起的链接转发记录。"""
+    with pending_link_lock:
+        if orig_msg_id is None:
+            return None
+        key = int(orig_msg_id)
+        if key in pending_link_forwards:
+            info = pending_link_forwards.get(key)
+            target_cid = info.get('chat_id')
+            target_user = info.get('username')
+            # 若双方都有明确的 chat_id 或 username，验证一致性避免误匹配
+            if target_cid and orig_chat_id and str(target_cid) != str(orig_chat_id):
+                if not (target_user and orig_username and target_user == orig_username.lower()):
+                    return None
+            return pending_link_forwards.pop(key)
+        return None
+
+
+
 

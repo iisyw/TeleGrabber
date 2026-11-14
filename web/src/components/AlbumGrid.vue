@@ -20,7 +20,8 @@
           decoding="async"
           @error="markPosterFailed(item)"
         />
-        <div class="play-badge">
+        <span v-if="isAnimation(item)" class="gif-badge">GIF</span>
+        <div v-else class="play-badge">
           <svg viewBox="0 0 24 24" width="48" height="48">
             <circle cx="12" cy="12" r="11" fill="rgba(0,0,0,0.6)" />
             <polygon points="9.5,7 9.5,17 18,12" fill="white" />
@@ -44,7 +45,7 @@ import {
   computeAlbumLayout,
   RectPart,
 } from '@/lib/album-layout';
-import { mediaUrl, thumbUrl } from '@/lib/media';
+import { isAnimation, isVideo, mediaUrl, thumbUrl } from '@/lib/media';
 
 const props = defineProps({
   items: { type: Array, required: true },
@@ -89,10 +90,6 @@ const ch = computed(() => {
   const bottom = layout.value.find((l) => l.sides & RectPart.Bottom);
   return bottom ? bottom.geometry.y + bottom.geometry.height : feedWidth.value;
 });
-
-function isVideo(item) {
-  return item.media_type === 'video';
-}
 
 function markPosterFailed(item) {
   posterFailed.value = { ...posterFailed.value, [item.id]: true };

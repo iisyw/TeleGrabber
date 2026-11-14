@@ -62,6 +62,31 @@ export function sourceTypeLabel(st) {
   return st.substring(0, 2);
 }
 
+export function isVideo(item) {
+  if (!item) return false;
+  if (item.media_type === 'video') return true;
+  if (item.media_type === 'animation') {
+    const fn = (item.filename || '').toLowerCase();
+    return !fn.endsWith('.gif');
+  }
+  return false;
+}
+
+export function isAnimation(item) {
+  return Boolean(item && item.media_type === 'animation');
+}
+
+export function mediaTypeLabel(type) {
+  const map = {
+    photo: '图片',
+    video: '视频',
+    animation: '动画',
+    document: '文档',
+    audio: '音频',
+  };
+  return map[type] || type || '-';
+}
+
 export function sourceTypeClass(st) {
   if (st === 'bot') return 'bot';
   if (st === 'private_user' || st === 'user') return 'private';

@@ -62,6 +62,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import SourceSidebar from '@/components/SourceSidebar.vue';
 import ChatHeader from '@/components/ChatHeader.vue';
@@ -269,8 +270,13 @@ watch(feedListRef, (newListEl, oldListEl) => {
   }
 });
 
+const route = useRoute();
+
 onMounted(async () => {
   isAtBottom = true;
+  if (route.query.source) {
+    store.currentSourceName = String(route.query.source);
+  }
   await store.refresh();
   await nextTick();
   scrollToBottom();

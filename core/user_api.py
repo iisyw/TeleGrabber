@@ -705,7 +705,15 @@ async def _forward_to_bot(bot_target, from_chat_id, message_id):
             from_chat_id=from_chat_id,
             message_ids=message_ids,
         )
-        return {"ok": True, "count": len(message_ids)}
+        numeric_chat_id = getattr(chat, 'id', None)
+        username = getattr(chat, 'username', None)
+        return {
+            "ok": True,
+            "count": len(message_ids),
+            "numeric_chat_id": numeric_chat_id,
+            "username": username,
+            "message_ids": message_ids,
+        }
     except Exception as e:
         if _is_forwards_restricted(e):
             _protected_chats.add(chat_key)

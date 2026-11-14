@@ -36,14 +36,12 @@ TeleGrabber/
 │   ├── telegram_meta.py   # 消息时间/ID、私有频道链接
 │   ├── thumbnails.py      # 缩略图生成与缓存
 │   ├── audit.py           # 审计日志
-│   ├── user_api.py        # MTProto (User API) 下载引擎
-│   ├── task_manager.py    # 下载任务持久化
-│   └── retry_service.py   # 任务重试队列
+│   └── user_api.py        # MTProto (User API) 下载引擎
 ├── webapp/                # FastAPI 应用组装与路由
 │   ├── app.py             # 中间件、异常、静态资源、SPA 回退
 │   ├── api_response.py    # 统一响应/错误码/requestId
 │   ├── health.py          # 媒体健康检查缓存
-│   └── routers/           # media / sources / tasks / storage / status
+│   └── routers/           # media / sources / storage / status
 ├── web/                   # Vue 3 前端（构建产物 web/dist，已忽略）
 ├── bot/                   # 机器人逻辑 (python-telegram-bot v21, async)
 │   ├── handlers.py        # 消息处理器
@@ -344,14 +342,6 @@ port = 5005
 ```
 
 > **无内置鉴权说明**：去掉登录后，任何能访问该端口的人都可以查看、删除媒体。修改 `host = "0.0.0.0"` 前请确认网络环境可信。
->
-> **任务中心配置**：
-> ```toml
-> [tasks]
-> retain_days = 30      # 终态任务保留天数
-> retry_concurrency = 2 # 重试并发数
-> min_free_mb = 512     # 下载前最小剩余磁盘空间
-> ```
 
 ## 配置选项
 

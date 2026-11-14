@@ -91,9 +91,8 @@ def save_media_metadata(user, media_info, final_filename, save_dir, media_group_
         source_username=media_info.get('source_username'),
         source_type=media_info.get('source_type'),
         message_time=message_time,
-        message_id=media_info.get('message_id'),
         current_message_id=media_info.get('current_message_id'),
-        original_message_id=media_info.get('original_message_id') or media_info.get('message_id'),
+        original_message_id=media_info.get('original_message_id'),
         width=media_info.get('width'),
         height=media_info.get('height'),
         file_size=media_info.get('file_size'),
@@ -141,7 +140,6 @@ def build_single_record(media_obj, media_type, date_dir, source_info, ext_for_la
         'chat_type': chat.type,
         'current_message_id': message.message_id,
         'original_message_id': get_message_id(message),
-        'message_id': message.message_id,
         'user_id': message.from_user.id if message.from_user else None,
         'user_name': (message.from_user.username or message.from_user.first_name) if message.from_user else None,
         'message_time': utc_to_local(get_message_date(message)).isoformat() if message and message.date else None,
@@ -289,7 +287,7 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
     source_type = record.get('source_type')
 
     target_chat_id = link_chat_id or orig_chat_id or chat_id
-    current_message_id = record.get('current_message_id') or record.get('message_id')
+    current_message_id = record.get('current_message_id')
     target_msg_id = link_msg_id or orig_msg_id or current_message_id
     if not link_chat_id and not orig_chat_id and (chat_type == 'private' or source_type in ["user", "private_user"]):
         target_chat_id = bot.username or bot.id
@@ -336,8 +334,7 @@ async def download_large_from_record(bot, record, status_chat_id, status_message
         source_username=record.get('source_username'),
         source_type=source_type,
         message_time=record.get('message_time'),
-        message_id=record.get('original_message_id') or record.get('link_message_id'),
-        current_message_id=record.get('current_message_id') or record.get('message_id'),
+        current_message_id=record.get('current_message_id'),
         original_message_id=record.get('original_message_id') or record.get('link_message_id'),
         width=record.get('width'),
         height=record.get('height'),
@@ -417,8 +414,7 @@ async def download_small_from_record(bot, record):
             source_username=record.get('source_username'),
             source_type=record.get('source_type'),
             message_time=record.get('message_time'),
-            message_id=record.get('original_message_id') or record.get('link_message_id'),
-            current_message_id=record.get('current_message_id') or record.get('message_id'),
+            current_message_id=record.get('current_message_id'),
             original_message_id=record.get('original_message_id') or record.get('link_message_id'),
             width=record.get('width'),
             height=record.get('height'),
@@ -503,7 +499,6 @@ async def download_large_via_user_api(update, context, media_obj, media_type, da
         source_name=source_info['source_name'], source_id=source_info['source_id'],
         source_link1=source_info['source_link1'], source_username=source_info['source_username'], source_type=source_info['source_type'],
         message_time=message_time,
-        message_id=get_message_id(update.message),
         current_message_id=update.message.message_id,
         original_message_id=get_message_id(update.message),
         width=getattr(media_obj, 'width', None),
@@ -544,7 +539,6 @@ async def save_small_file(update, media_obj, media_type, date_dir, source_info, 
             source_name=source_info['source_name'], source_id=source_info['source_id'],
             source_link1=source_info['source_link1'], source_username=source_info['source_username'], source_type=source_info['source_type'],
             message_time=message_time,
-            message_id=get_message_id(update.message),
             current_message_id=update.message.message_id,
             original_message_id=get_message_id(update.message),
             width=getattr(media_obj, 'width', None),

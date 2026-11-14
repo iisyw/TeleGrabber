@@ -47,11 +47,11 @@ class UtilsTestCase(unittest.TestCase):
         self.assertTrue(saved)
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute(
-                "SELECT message_id, current_message_id, original_message_id, width, height "
+                "SELECT current_message_id, original_message_id, width, height "
                 "FROM media_metadata WHERE file_unique_id = ?",
                 ("unique-id",),
             ).fetchone()
-        self.assertEqual(row, (123, 321, 123, 1080, 1920))
+        self.assertEqual(row, (321, 123, 1080, 1920))
 
     def test_db_connection_reuses_initialized_wal_mode(self):
         with utils.get_db_connection() as conn:

@@ -73,7 +73,8 @@
               decoding="async"
               @error="posterFailed = true"
             />
-            <div class="play-badge">
+            <span v-if="isAnimation" class="gif-badge">GIF</span>
+            <div v-else class="play-badge">
               <svg viewBox="0 0 24 24" width="48" height="48">
                 <circle cx="12" cy="12" r="11" fill="rgba(0,0,0,0.6)" />
                 <polygon points="9.5,7 9.5,17 18,12" fill="white" />
@@ -118,6 +119,8 @@ import {
   avatarInitial,
   avatarStyle,
   formatTime,
+  isAnimation as checkIsAnimation,
+  isVideo as checkIsVideo,
   mediaUrl,
   sourceTypeClass,
   sourceTypeLabel,
@@ -136,7 +139,8 @@ const isMulti = computed(() => isGroup.value && items.value.length > 1);
 const refItem = computed(() => items.value[0] || {});
 const publisher = computed(() => refItem.value.source_name || refItem.value.user_name || '');
 const sourceType = computed(() => refItem.value.source_type || '');
-const isVideo = computed(() => refItem.value.media_type === 'video');
+const isVideo = computed(() => checkIsVideo(refItem.value));
+const isAnimation = computed(() => checkIsAnimation(refItem.value));
 const thumb = computed(() => thumbUrl(refItem.value));
 const originalUrl = computed(() => mediaUrl(refItem.value));
 const posterFailed = ref(false);
@@ -205,8 +209,9 @@ const caption = computed(() => {
 
 const extra = computed(() => {
   let text = '';
-  if (refItem.value.message_id !== null && refItem.value.message_id !== undefined) {
-    text += `#${refItem.value.message_id}`;
+  const msgId = refItem.value.original_message_id ?? refItem.value.current_message_id;
+  if (msgId !== null && msgId !== undefined) {
+    text += `#${msgId}`;
   }
   if (isGroup.value && items.value.length > 4) text += ` · ${items.value.length} 项`;
   return text.trim();

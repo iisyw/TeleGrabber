@@ -16,13 +16,15 @@
             {{ items.length > 1 ? `${index + 1} / ${items.length}` : '' }}
           </div>
           <div class="modal-media">
-            <template v-if="current.media_type === 'video'">
+            <template v-if="isVideo(current)">
               <video
                 v-if="!videoError"
                 :key="`video-${current.id}`"
                 ref="videoEl"
                 controls
                 autoplay
+                :loop="isAnimation(current)"
+                :muted="isAnimation(current)"
                 preload="metadata"
                 :src="mediaUrl(current)"
                 @timeupdate="onTimeUpdate"
@@ -126,6 +128,9 @@ import { updateMediaMeta } from '@/api/media';
 import {
   buildPrivateMessageLink,
   formatTime,
+  isAnimation,
+  isVideo,
+  mediaTypeLabel,
   mediaUrl,
   sourceTypeLabel,
 } from '@/lib/media';
@@ -250,7 +255,7 @@ const metaRows = computed(() => {
 
   const rows = [];
   rows.push({ label: '文件', value: item.filename || '' });
-  rows.push({ label: '类型', value: item.media_type || '' });
+  rows.push({ label: '类型', value: mediaTypeLabel(item.media_type) });
   if (item.width && item.height) {
     rows.push({ label: '尺寸', value: `${item.width} × ${item.height}` });
   }
@@ -269,9 +274,10 @@ const metaRows = computed(() => {
     rows.push({ label: '来源用户名', value: '-' });
   }
 
+  const msgId = item.original_message_id ?? item.current_message_id;
   const link1 = item.source_link1 ||
-    (item.source_username && item.message_id !== null && item.message_id !== undefined
-      ? `https://t.me/${item.source_username}/${item.message_id}`
+    (item.source_username && msgId !== null && msgId !== undefined
+      ? `https://t.me/${item.source_username}/${msgId}`
       : '');
   if (link1) {
     const isPrivateLink = link1.includes('t.me/c/');
@@ -282,7 +288,6 @@ const metaRows = computed(() => {
     });
     // 公开频道额外提供数字链接兜底；频道改名后用户名链接可能失效
     if (!isPrivateLink && item.source_type === 'channel' && item.source_id) {
-      const msgId = item.original_message_id ?? item.message_id;
       const privateLink = msgId !== null && msgId !== undefined
         ? buildPrivateMessageLink(item.source_id, msgId)
         : '';
@@ -304,9 +309,6 @@ const metaRows = computed(() => {
 
   rows.push({ divider: true });
   if (item.media_group_id) rows.push({ label: '媒体组 ID', value: item.media_group_id });
-  if (item.message_id !== null && item.message_id !== undefined) {
-    rows.push({ label: '消息 ID', value: item.message_id });
-  }
   if (item.message_time) rows.push({ label: '消息时间', value: formatTime(item.message_time) });
   if (item.datetime) rows.push({ label: '储存时间', value: formatTime(item.datetime) });
   return rows;
@@ -394,7 +396,7 @@ function onKeydown(event) {
   if (event.key === 'Escape') close();
   else if (event.key === 'ArrowLeft') prev();
   else if (event.key === 'ArrowRight') next();
-  else if (event.key === ' ' && current.value && current.value.media_type === 'video') {
+  else if (event.key === ' ' && current.value && isVideo(current.value)) {
     event.preventDefault();
     toggleVideo();
   }

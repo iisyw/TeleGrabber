@@ -46,15 +46,13 @@ core/media_files.py  # 保存目录、文件名与扩展名
 core/telegram_meta.py # 消息时间/ID、私有频道链接
 core/thumbnails.py   # 缩略图生成、缓存与清理
 core/audit.py        # 审计日志
-core/task_manager.py # 下载任务持久化、进度、取消、批次
-core/retry_service.py # 任务重试队列、优先级、Bot/User API 回退
 core/runtime_state.py # Bot 运行状态与最近错误
 core/user_api.py     # Pyrogram 同步封装、转发、链接解析、下载
 bot/                 # 消息处理、媒体组、下载、按钮回调、按钮状态
 webapp/app.py        # FastAPI 组装：中间件、异常、静态资源、SPA 回退
 webapp/api_response.py # 统一响应/错误码/requestId
 webapp/health.py     # 媒体文件健康检查与缓存
-webapp/routers/      # media / sources / tasks / storage / status 路由
+webapp/routers/      # media / sources / storage / status 路由
 web/                 # Vue 3 前端；组件与视图同目录同名 .scss
 downloads/           # 原始媒体（不入库）
 data/                # SQLite、缩略图、审计日志、session
@@ -73,15 +71,11 @@ data/                # SQLite、缩略图、审计日志、session
   - 修改表结构时，直接更新 `CREATE TABLE` 与 `utils._schema_docs`
   - 不添加旧列迁移、旧值回填、旧表删除逻辑，除非用户明确要求升级旧库
   - 新装用户从空库启动即可
-- 所有数据库写入必须通过 `utils._db_lock` 或 `task_manager._lock` 串行化，避免 `database is locked`。
+- 所有数据库写入必须通过 `utils._db_lock` 串行化，避免 `database is locked`。
 - `media_metadata` 是媒体唯一索引：
   - `file_unique_id` 唯一，用于去重
   - 原始媒体只存一份；缩略图是派生文件，不写入媒体记录
   - 来源链接只保留 `source_link1`；公开频道用用户名链接，私有频道用 `t.me/c` 链接
-- `download_tasks`：
-  - 每次媒体组下载/重下生成独立 `batch_id`
-  - 任务中心按 `batch_id` 分组，不能只按 `media_group_id` 合并
-  - 成功任务必须补齐 `downloaded_bytes`，不能长期显示 `0B / 总大小`
 - 旧字段、旧状态值、旧兼容标记不得重新引入。
 
 ---
@@ -125,7 +119,7 @@ data/                # SQLite、缩略图、审计日志、session
 ## 7. 前端规范
 
 - Vue 3 `<script setup>`，组合式 API；不要引入 Vuex 或旧版写法。
-- 路由：欢迎页 `/`、消息流 `/feed`、下载任务 `/tasks`、存储管理 `/storage`、系统状态 `/status`。
+- 路由：欢迎页 `/`、消息流 `/feed`、存储管理 `/storage`、系统状态 `/status`。
 - 媒体列表：
   - 分页使用 keyset（`cursor_time` + `cursor_id`），不要恢复 offset 分页
   - 消息流使用虚拟滚动，不要一次渲染全部记录
@@ -186,10 +180,6 @@ data/                # SQLite、缩略图、审计日志、session
   - 不要在 Web 线程直接调用 asyncio 对象
   - User API 的同步封装通过 `run_coroutine_threadsafe` 调度
   - Bot API 下载在需要时通过独立 Bot 实例或主事件循环执行
-- 下载重试队列：
-  - `retry_service` 使用独立 worker 线程与优先级队列
-  - 暂停只对重试队列中尚未开始的任务生效
-  - 下载中取消只能在当前下载步骤结束后生效
 - 缩略图生成使用独立线程池与信号量，避免阻塞下载主流程。
 
 ---
@@ -214,7 +204,6 @@ data/                # SQLite、缩略图、审计日志、session
    - `/healthz`
    - `/api/media`
    - `/api/sources`
-   - `/api/tasks`
    - `/api/status`
 5. 规范符合性：
    - 0 处业务组件重复错误弹窗
