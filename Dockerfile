@@ -1,6 +1,7 @@
 FROM node:20-alpine AS web-builder
 
 WORKDIR /web
+RUN npm config set registry https://registry.npmmirror.com
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
